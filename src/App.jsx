@@ -622,9 +622,9 @@ export default function TracerBuddyApp() {
                 </div>
                 <div className="mt-4 space-y-3">
                   <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4"><p className="text-sm font-black">Last known point</p><p className="mt-1 text-xs text-gray-400">{lastLocation?`${lastLocation.lat.toFixed(5)}, ${lastLocation.lng.toFixed(5)}`:"No GPS point yet."}</p></div>
-                  <div className="grid grid-cols-2 gap-3"><button onClick={()=>openMaps(lastLocation)} className="h-14 rounded-2xl bg-amber-400 text-sm font-black text-[#ffffff] active:scale-95">Open Maps</button><button onClick={lostBall} className="h-14 rounded-2xl bg-gray-100 text-sm font-black text-gray-700 active:scale-95">Find Ball</button></div>
+                  <div className="grid grid-cols-2 gap-3"><button onClick={()=>openMaps(lastLocation)} className="h-14 rounded-2xl bg-amber-400 text-sm font-black text-[#ffffff] active:scale-95">Open Maps</button><button onClick={lostBall} className="h-14 rounded-2xl bg-gray-100 text-sm font-black text-white active:scale-95">Find Ball</button></div>
                 </div>
-              </Card>
+              </div>
             </div>
           )}
 
