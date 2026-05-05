@@ -141,10 +141,10 @@ function exportShotsCSV(shots) {
 }
 
 // ─── UI Components ────────────────────────────────────────────────────────────
-function Card({children,className=""}){return <div className={"rounded-2xl border border-gray-200 bg-white text-white shadow-lg "+className}>{children}</div>;}
+function Card({children,className=""}){return <div className={"rounded-2xl border border-gray-200 bg-white text-gray-900 shadow-sm "+className}>{children}</div>;}
 function PillBtn({active,children,onClick,tone="gold",suggested=false}){
   const ac=tone==="green"?"bg-emerald-300 text-[#ffffff]":tone==="white"?"bg-white text-[#ffffff]":"bg-amber-400 text-[#ffffff]";
-  const sc="bg-emerald-900/60 text-[#15803d]/80 border border-emerald-400/50";
+  const sc="bg-emerald-900/60 text-green-700 border border-emerald-400/50";
   let cls;
   if(active) cls=ac+(suggested?" ring-2 ring-green-600 ring-offset-1 ring-offset-[#f9fafb]":"");
   else if(suggested) cls=sc;
@@ -152,7 +152,7 @@ function PillBtn({active,children,onClick,tone="gold",suggested=false}){
   return <button onClick={onClick} className={"relative rounded-2xl px-3 py-2.5 text-[11px] font-black transition active:scale-95 "+(suggested&&!active?"suggest-pulse ":"")+cls}>{suggested&&<span style={{position:"absolute",top:"-5px",right:"-4px",background:"#6ee7b7",color:"#ffffff",fontSize:"9px",fontWeight:900,borderRadius:"999px",padding:"1px 4px",lineHeight:1.4}}>★</span>}{children}</button>;
 }
 function TabBtn({active,icon,label,onClick}){return <button onClick={onClick} className={"rounded-2xl px-2 py-2 text-[10px] font-black transition active:scale-95 sm:text-[11px] "+(active?"bg-amber-400 text-[#ffffff]":"text-gray-400")}><span className="mr-1">{icon}</span>{label}</button>;}
-function StatCard({label,value,sub=""}){return <Card className="p-3"><p className="text-[10px] uppercase tracking-[0.14em] text-gray-400">{label}</p><p className="mt-1 text-xl font-black">{value}</p>{sub&&<p className="text-[10px] text-gray-400 mt-0.5">{sub}</p>}</Card>;}
+function StatCard({label,value,sub=""}){return <Card className="p-3"><p className="text-[10px] uppercase tracking-[0.14em] text-gray-500">{label}</p><p className="mt-1 text-xl font-black text-gray-900">{value}</p>{sub&&<p className="text-[10px] text-gray-500 mt-0.5">{sub}</p>}</Card>;}
 function RecenterMap({center,zoom=17,enabled=true}){const map=useMap();useEffect(()=>{if(center&&enabled)map.setView(center,zoom,{animate:true});},[center,zoom,map,enabled]);return null;}
 function FitBounds({shots,currentShot,enabled=true}){const map=useMap();useEffect(()=>{if(!enabled)return;const pts=[];if(currentShot?.start)pts.push([currentShot.start.lat,currentShot.start.lng]);shots.forEach(s=>{if(s.start)pts.push([s.start.lat,s.start.lng]);if(s.end)pts.push([s.end.lat,s.end.lng]);});if(pts.length>=2)map.fitBounds(pts,{padding:[40,40],maxZoom:18});},[shots,currentShot,enabled,map]);return null;}
 
@@ -171,7 +171,7 @@ function CourseSearchPanel({onCourseSelected,selectedCourse}){
   async function search(){if(!query.trim())return;setLoading(true);setErr("");setResults([]);try{const d=await apiSearchCourses(query.trim());const l=d.courses??d.results??d??[];setResults(Array.isArray(l)?l.slice(0,6):[]);if(!l.length)setErr("No courses found.");}catch{setErr("Search failed. Check connection.");}finally{setLoading(false);}}
   async function select(r){const id=r.id??r.course_id??r.courseId;setLoading(true);setErr("");try{if(id){const d=await apiFetchCourse(id);onCourseSelected({raw:r,detail:d,holes:extractHoles(d)});}else{onCourseSelected({raw:r,holes:[]});}setResults([]);setQuery("");}catch{setErr("Could not load course data.");}finally{setLoading(false);}}
   if(selectedCourse)return <div className="mb-4 rounded-2xl border border-[#15803d]/20 bg-[#15803d]/10 p-4"><div className="flex items-center justify-between"><div><p className="text-[10px] font-black uppercase tracking-[0.18em] text-[#15803d]">Course Loaded ✓</p><p className="mt-0.5 font-black">{extractCourseName(selectedCourse.raw)}</p><p className="text-xs text-gray-400">{selectedCourse.holes.length>0?`${selectedCourse.holes.length} holes · GPS active`:"Loaded · No GPS hole data"}</p></div><button onClick={()=>onCourseSelected(null)} className="rounded-xl bg-gray-100 px-3 py-2 text-xs font-bold text-gray-700 active:scale-95">Change</button></div></div>;
-  return <div className="mb-4"><p className="mb-2 text-[10px] font-black uppercase tracking-[0.22em] text-gray-400">Find Your Course (Optional)</p><div className="flex gap-2"><input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&search()} placeholder="e.g. Carlisle Country Club" className="flex-1 rounded-2xl border border-gray-200 bg-gray-100 px-4 py-3 text-sm text-white placeholder:text-gray-400 outline-none"/><button onClick={search} disabled={loading} className="h-12 w-12 rounded-2xl bg-amber-400 text-lg font-black text-[#ffffff] disabled:opacity-50 active:scale-95">{loading?"…":"🔍"}</button></div>{err&&<p className="mt-2 text-xs text-red-500">{err}</p>}{results.length>0&&<div className="mt-2 space-y-2">{results.map((r,i)=><button key={r.id??i} onClick={()=>select(r)} className="w-full rounded-2xl border border-gray-200 bg-white p-3 text-left active:scale-[0.98]"><p className="text-sm font-black">{extractCourseName(r)}</p><p className="text-xs text-gray-400">{r.location?.city?`${r.location.city}, `:""}{r.location?.state??r.city??""}</p></button>)}</div>}</div>;
+  return <div className="mb-4"><p className="mb-2 text-[10px] font-black uppercase tracking-[0.22em] text-gray-400">Find Your Course (Optional)</p><div className="flex gap-2"><input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&search()} placeholder="e.g. Carlisle Country Club" className="flex-1 rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 placeholder:text-gray-400 outline-none"/><button onClick={search} disabled={loading} className="h-12 w-12 rounded-2xl bg-amber-400 text-lg font-black text-[#ffffff] disabled:opacity-50 active:scale-95">{loading?"…":"🔍"}</button></div>{err&&<p className="mt-2 text-xs text-red-500">{err}</p>}{results.length>0&&<div className="mt-2 space-y-2">{results.map((r,i)=><button key={r.id??i} onClick={()=>select(r)} className="w-full rounded-2xl border border-gray-200 bg-white p-3 text-left active:scale-[0.98]"><p className="text-sm font-black">{extractCourseName(r)}</p><p className="text-xs text-gray-400">{r.location?.city?`${r.location.city}, `:""}{r.location?.state??r.city??""}</p></button>)}</div>}</div>;
 }
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
@@ -438,7 +438,7 @@ export default function TracerBuddyApp() {
   // ── Pre-round screen ──────────────────────────────────────────────────────────
   if(!roundStarted){
     return (
-      <div className="min-h-screen bg-[#f9fafb] px-4 py-6 text-white">
+      <div className="min-h-screen bg-[#f9fafb] px-4 py-6 text-gray-900">
         <div className="mx-auto flex min-h-[calc(100vh-3rem)] max-w-md flex-col justify-between">
           <div>
             <div className="mb-6 flex items-center justify-between pt-2">
@@ -454,14 +454,14 @@ export default function TracerBuddyApp() {
               <div className="mb-4 rounded-2xl border border-gray-200 bg-white p-4">
                 <div className="flex items-center gap-3">
                   <div style={{animation:"splashDot 1s ease-in-out infinite"}} className="text-xl">📡</div>
-                  <div><p className="text-sm font-black text-white">Detecting your course...</p><p className="text-xs text-gray-400">Checking what's near your GPS location</p></div>
+                  <div><p className="text-sm font-black text-gray-900">Detecting your course...</p><p className="text-xs text-gray-400">Checking what's near your GPS location</p></div>
                 </div>
               </div>
             )}
             {autoDetect.state==="found"&&!selectedCourse&&(
               <div className="mb-4 rounded-2xl border border-[#b45309]/30 bg-amber-50 p-4">
                 <p className="text-[10px] font-black uppercase tracking-[0.18em] text-amber-700 mb-1">Detected Nearby · {autoDetect.distMiles} mi away</p>
-                <p className="font-black text-white text-base mb-0.5">{extractCourseName(autoDetect.course)}</p>
+                <p className="font-black text-gray-900 text-base mb-0.5">{extractCourseName(autoDetect.course)}</p>
                 <p className="text-xs text-gray-400 mb-3">
                   {[autoDetect.course?.location?.city||autoDetect.course?.city, autoDetect.course?.location?.state||autoDetect.course?.state].filter(Boolean).join(", ")}
                 </p>
@@ -509,7 +509,7 @@ export default function TracerBuddyApp() {
 
   // ── Main round screen ─────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-[#f9fafb] text-white">
+    <div className="min-h-screen bg-[#f9fafb] text-gray-900">
       <div className="mx-auto max-w-md">
         {!isOnline&&<div className="bg-red-50 border-b border-red-400/30 px-4 py-2 text-xs font-black text-red-500 text-center">⚡ Offline — GPS still works</div>}
 
@@ -517,7 +517,7 @@ export default function TracerBuddyApp() {
         <div className="sticky top-0 z-20 border-b border-gray-200 bg-[#f9fafb]/95 px-4 pb-3 pt-4 ">
           <div className="flex items-center justify-between">
             <div><div className="text-2xl font-black tracking-tight"><span className="text-[#15803d]">Tracer</span><span className="text-amber-700">Buddy</span></div><p className="text-xs text-gray-400 truncate max-w-[200px]">{selectedCourse?extractCourseName(selectedCourse.raw):"No course loaded"}</p></div>
-            <div className="rounded-2xl border border-[#b45309]/30 bg-amber-50 px-3 py-2 text-sm font-black text-amber-700/80">Hole {hole}</div>
+            <div className="rounded-2xl border border-[#b45309]/30 bg-amber-50 px-3 py-2 text-sm font-black text-amber-700">Hole {hole}</div>
           </div>
           <div className="mt-3 grid grid-cols-4 gap-1 rounded-2xl bg-gray-50 p-1">
             <TabBtn active={activeTab==="track"} icon="📍" label="Track" onClick={()=>setActiveTab("track")}/>
@@ -579,7 +579,7 @@ export default function TracerBuddyApp() {
                 <div className="bg-gradient-to-br from-emerald-400/15 to-amber-300/10 p-5">
                   <div className="mb-4 rounded-2xl border border-[#15803d]/15 bg-[#ffffff] p-4 text-center"><div className="mb-2 text-5xl">🎯</div><p className="font-black">GPS Shot Tracker</p><p className="mt-1 text-xs leading-5 text-gray-400">Stand still for a second when marking shots.</p></div>
                   <div className="rounded-2xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">{loading?"Working...":status}</div>
-                  <div className="mt-4"><p className="mb-2 text-[10px] font-black uppercase tracking-[0.22em] text-gray-400">Result</p><div className="grid grid-cols-4 gap-2">{RESULTS.map(item=><PillBtn key={item} active={result===item} onClick={()=>setResult(item)}>{item}</PillBtn>)}</div><input value={note} onChange={e=>setNote(e.target.value)} placeholder="Optional note: wind, contact, target..." className="mt-3 w-full rounded-2xl border border-gray-200 bg-gray-100 px-4 py-3 text-sm text-white placeholder:text-gray-400 outline-none"/></div>
+                  <div className="mt-4"><p className="mb-2 text-[10px] font-black uppercase tracking-[0.22em] text-gray-400">Result</p><div className="grid grid-cols-4 gap-2">{RESULTS.map(item=><PillBtn key={item} active={result===item} onClick={()=>setResult(item)}>{item}</PillBtn>)}</div><input value={note} onChange={e=>setNote(e.target.value)} placeholder="Optional note: wind, contact, target..." className="mt-3 w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 placeholder:text-gray-400 outline-none"/></div>
                   <div className="mt-4 grid grid-cols-1 gap-3">
                     <button disabled={loading} onClick={hitShot} style={{height:58,borderRadius:16,background:"#15803d",fontSize:15,fontWeight:900,color:"#f9fafb",letterSpacing:"0.02em",border:"none"}} className="btn-action disabled:opacity-40">📍 Hit Shot</button>
                     <button disabled={loading} onClick={ballFound} style={{height:58,borderRadius:16,background:"#b45309",fontSize:15,fontWeight:900,color:"#f9fafb",letterSpacing:"0.02em",border:"none"}} className="btn-action disabled:opacity-40">✅ Ball Found Here</button>
@@ -594,7 +594,7 @@ export default function TracerBuddyApp() {
           {activeTab==="map"&&(
             <div className="tab-content">
             <Card className="overflow-hidden p-0">
-                <div className="mb-4 flex items-center justify-between"><div><p className="text-xs uppercase tracking-[0.22em] text-gray-400">Satellite Map</p><h2 className="text-2xl font-black">{mapMode==="hole"?`Hole ${hole}`:"Full Round"}</h2></div><div className="rounded-2xl bg-gray-50 px-3 py-2 text-xs font-black text-amber-700/80">GPS ±{lastLocation?.accuracy||"-"}m</div></div>
+                <div className="mb-4 flex items-center justify-between"><div><p className="text-xs uppercase tracking-[0.22em] text-gray-400">Satellite Map</p><h2 className="text-2xl font-black">{mapMode==="hole"?`Hole ${hole}`:"Full Round"}</h2></div><div className="rounded-2xl bg-gray-50 px-3 py-2 text-xs font-black text-amber-700">GPS ±{lastLocation?.accuracy||"-"}m</div></div>
                 {distanceToPin!=null&&<div className="mb-3 flex items-center justify-between rounded-2xl border border-[#15803d]/15 bg-[#15803d]/10 p-3"><span className="text-xs font-black text-[#15803d]">Distance to Pin</span><span className="text-2xl font-black text-amber-700">{distanceToPin} yds</span></div>}
                 <div className="mb-3 grid grid-cols-3 gap-2">
                   {[["Shots",visibleShots.length],["Lines",shotLines.length],["Yards",visibleDist||"-"]].map(([l,v])=><div key={l} className="rounded-2xl border border-gray-200 bg-gray-50 p-3"><p className="text-[10px] text-gray-400">{l}</p><p className="text-lg font-black">{v}</p></div>)}
@@ -715,7 +715,7 @@ export default function TracerBuddyApp() {
                               style={{width:30,height:30,borderRadius:8,background:"rgba(0,0,0,0.06)",color:"rgba(0,0,0,0.55)",fontWeight:900,fontSize:16,lineHeight:1,flexShrink:0}}
                               className="active:scale-90 transition-transform"
                             >−</button>
-                            <div style={{flex:1,textAlign:"center",fontWeight:900,fontSize:16,color:s>0?"white":"rgba(0,0,0,0.12)"}}>
+                            <div style={{flex:1,textAlign:"center",fontWeight:900,fontSize:16,color:s>0?"#111827":"rgba(0,0,0,0.2)"}}>
                               {s>0?s:"·"}
                             </div>
                             <button
@@ -804,9 +804,9 @@ export default function TracerBuddyApp() {
                       <div key={m.name} className="rounded-2xl bg-gray-50 p-3">
                         <div className="flex items-center justify-between mb-1">
                           <p className="font-black text-sm">{m.name}</p>
-                          <span className={"text-xs font-black px-2 py-0.5 rounded-full "+(m.goodPct>=70?"bg-[#15803d]/10 text-[#15803d]":"bg-amber-900/40 text-amber-700/80")}>{m.goodPct}% good</span>
+                          <span className={"text-xs font-black px-2 py-0.5 rounded-full "+(m.goodPct>=70?"bg-[#15803d]/10 text-[#15803d]":"bg-amber-900/40 text-amber-700")}>{m.goodPct}% good</span>
                         </div>
-                        <p className="text-xs text-gray-400">Misses <span className="text-amber-700/80 font-black">{m.dir}</span> {m.pct}% of the time · {m.total} shots tracked</p>
+                        <p className="text-xs text-gray-400">Misses <span className="text-amber-700 font-black">{m.dir}</span> {m.pct}% of the time · {m.total} shots tracked</p>
                       </div>
                     ))}
                   </div>
@@ -817,7 +817,7 @@ export default function TracerBuddyApp() {
               {clubStats.length>0&&(
                 <Card className="p-4">
                   <div className="mb-3 font-black">Club Averages (This Round)</div>
-                  <div className="space-y-2">{clubStats.map(r=><div key={r.name} className="grid grid-cols-4 rounded-2xl bg-gray-50 p-3 text-sm"><div className="col-span-2 font-bold">{r.name}</div><div className="text-gray-600">Avg {r.avg}y</div><div className="text-right text-amber-700/80">Best {r.best}y</div></div>)}</div>
+                  <div className="space-y-2">{clubStats.map(r=><div key={r.name} className="grid grid-cols-4 rounded-2xl bg-gray-50 p-3 text-sm"><div className="col-span-2 font-bold">{r.name}</div><div className="text-gray-600">Avg {r.avg}y</div><div className="text-right text-amber-700">Best {r.best}y</div></div>)}</div>
                 </Card>
               )}
 
@@ -827,7 +827,7 @@ export default function TracerBuddyApp() {
                   <div className="mb-1 font-black">📐 Club Gapping</div>
                   <p className="text-xs text-gray-400 mb-3">Personal averages · min {MIN_SHOTS} shots per club.</p>
                   {clubGaps.gaps.length===0?<p className="text-xs text-[#15803d] rounded-2xl bg-[#15803d]/06 p-3">Bag looks well-gapped. No significant gaps found.</p>:
-                    <div className="space-y-2 mb-3">{clubGaps.gaps.map((g,i)=><div key={i} className="rounded-2xl bg-gray-50 p-3 border border-[#b45309]/20"><div className="flex items-center justify-between mb-1"><p className="text-sm font-black text-amber-700/80">{g.gap}y gap</p>{g.gap>30&&<span className="text-[10px] font-black bg-red-50 text-red-500 px-2 py-0.5 rounded-full">Significant</span>}</div><p className="text-xs text-gray-600">{g.high.name} ({g.high.avg}y) → {g.low.name} ({g.low.avg}y)</p><p className="text-xs text-gray-400 mt-1">Consider a club that carries ~{Math.round((g.high.avg+g.low.avg)/2)}y</p></div>)}</div>
+                    <div className="space-y-2 mb-3">{clubGaps.gaps.map((g,i)=><div key={i} className="rounded-2xl bg-gray-50 p-3 border border-[#b45309]/20"><div className="flex items-center justify-between mb-1"><p className="text-sm font-black text-amber-700">{g.gap}y gap</p>{g.gap>30&&<span className="text-[10px] font-black bg-red-50 text-red-500 px-2 py-0.5 rounded-full">Significant</span>}</div><p className="text-xs text-gray-600">{g.high.name} ({g.high.avg}y) → {g.low.name} ({g.low.avg}y)</p><p className="text-xs text-gray-400 mt-1">Consider a club that carries ~{Math.round((g.high.avg+g.low.avg)/2)}y</p></div>)}</div>
                   }
                   <div className="space-y-1.5">{clubGaps.clubs.map(c=><div key={c.name} className="flex items-center gap-2"><p className="w-20 text-xs text-gray-600 flex-shrink-0">{c.name}</p><div className="flex-1 h-2 rounded-full bg-gray-100 overflow-hidden"><div className="h-full rounded-full bg-amber-400" style={{width:`${Math.min(100,(c.avg/280)*100)}%`}}/></div><p className="w-12 text-right text-xs font-black text-gray-700">{c.avg}y</p></div>)}</div>
                 </Card>
@@ -843,7 +843,7 @@ export default function TracerBuddyApp() {
                   </div>
                 </div>
                 {shots.length===0?<p className="rounded-2xl bg-gray-50 p-4 text-sm text-gray-400">No shots yet. Go to Track and save your first shot.</p>:
-                  <div className="space-y-2">{shots.map(s=><div key={s.id} className="rounded-2xl bg-gray-50 p-3"><div className="flex items-center justify-between gap-3"><div><p className="font-black">{s.club} — {s.distance} yards</p><p className="text-xs text-gray-400">Hole {s.hole} · {s.shotShape} · {s.lie} · {s.result} · {fmtTime(s.finishedAt)} · ±{s.end?.accuracy||"?"}m</p>{s.note&&<p className="mt-1 text-xs text-gray-600">Note: {s.note}</p>}</div><button onClick={()=>openMaps(s.end)} className="rounded-xl bg-gray-100 p-2 text-amber-700/80">➤</button></div></div>)}</div>
+                  <div className="space-y-2">{shots.map(s=><div key={s.id} className="rounded-2xl bg-gray-50 p-3"><div className="flex items-center justify-between gap-3"><div><p className="font-black">{s.club} — {s.distance} yards</p><p className="text-xs text-gray-400">Hole {s.hole} · {s.shotShape} · {s.lie} · {s.result} · {fmtTime(s.finishedAt)} · ±{s.end?.accuracy||"?"}m</p>{s.note&&<p className="mt-1 text-xs text-gray-600">Note: {s.note}</p>}</div><button onClick={()=>openMaps(s.end)} className="rounded-xl bg-gray-100 p-2 text-amber-700">➤</button></div></div>)}</div>
                 }
               </Card>
 
@@ -864,7 +864,7 @@ export default function TracerBuddyApp() {
                             <div><p className="font-black text-sm">{r.courseName}</p><p className="text-xs text-gray-400">{fmtDate(r.date)}</p></div>
                             <div className="flex items-center gap-2">
                               <div className={`text-2xl font-black ${toParColor}`}>{toParStr}</div>
-                              <button onClick={()=>setShareRound(r)} className="rounded-xl bg-amber-400/15 px-2 py-1.5 text-xs font-bold text-amber-700/80 active:scale-95">Share</button>
+                              <button onClick={()=>setShareRound(r)} className="rounded-xl bg-amber-400/15 px-2 py-1.5 text-xs font-bold text-amber-700 active:scale-95">Share</button>
                             </div>
                           </div>
                           <div className="grid grid-cols-4 gap-1.5">
