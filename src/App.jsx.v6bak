@@ -1,0 +1,1162 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { MapContainer, Marker, Polyline, Popup, TileLayer, useMap } from "react-leaflet";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
+
+// ─── API ──────────────────────────────────────────────────────────────────────
+const GOLF_API_KEY = "YAHGWRREYXYA2FRGMXT2L7WSIA";
+const GOLF_API_BASE = "https://api.golfcourseapi.com/v1";
+
+async function apiSearchCourses(query) {
+  const res = await fetch(`${GOLF_API_BASE}/search?search_query=${encodeURIComponent(query)}`, {
+    headers: { Authorization: `Key ${GOLF_API_KEY}` },
+  });
+  if (!res.ok) throw new Error(`Search failed (${res.status})`);
+  return res.json();
+}
+
+async function apiFetchCourse(id) {
+  const cacheKey = `tracerbuddy_course_${id}`;
+  const cached = localStorage.getItem(cacheKey);
+  if (cached) return JSON.parse(cached);
+  const res = await fetch(`${GOLF_API_BASE}/courses/${id}`, {
+    headers: { Authorization: `Key ${GOLF_API_KEY}` },
+  });
+  if (!res.ok) throw new Error(`Course fetch failed (${res.status})`);
+  const data = await res.json();
+  localStorage.setItem(cacheKey, JSON.stringify(data));
+  return data;
+}
+
+function extractGreen(hole) {
+  if (!hole) return null;
+  const g = hole.green_location || hole.greenLocation || hole.pin_location || hole.green || null;
+  if (!g) return null;
+  const lat = g.lat ?? g.latitude ?? g.Lat ?? null;
+  const lng = g.lng ?? g.lon ?? g.longitude ?? g.Lng ?? null;
+  if (lat == null || lng == null) return null;
+  return { lat, lng };
+}
+
+function extractPar(hole) {
+  if (!hole) return 4;
+  return hole.par ?? hole.hole_par ?? hole.Par ?? 4;
+}
+
+function extractHoles(courseData) {
+  if (!courseData) return [];
+  const root = courseData.course ?? courseData;
+  return root.holes ?? root.Holes ?? [];
+}
+
+function extractCourseName(r) {
+  if (!r) return "Unknown Course";
+  return r.course_name || r.club_name || r.name || r.courseName || "Unknown Course";
+}
+
+// ─── Weather & Elevation (Open-Meteo — free, no key) ─────────────────────────
+async function fetchWeatherAndElevation(lat, lng) {
+  const [weatherRes, elevRes] = await Promise.all([
+    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=weather_code,wind_speed_10m,wind_direction_10m,temperature_2m&wind_speed_unit=mph&temperature_unit=fahrenheit&forecast_days=1`),
+    fetch(`https://api.open-meteo.com/v1/elevation?latitude=${lat}&longitude=${lng}`),
+  ]);
+  const weather = await weatherRes.json();
+  const elev = await elevRes.json();
+  const c = weather.current ?? {};
+  return {
+    windSpeed: Math.round(c.wind_speed_10m ?? 0),
+    windDir: Math.round(c.wind_direction_10m ?? 0),
+    tempF: Math.round(c.temperature_2m ?? 70),
+    weatherCode: c.weather_code ?? 0,
+    elevationFt: Math.round((elev.elevation?.[0] ?? 0) * 3.28084),
+  };
+}
+
+function weatherCodeLabel(code) {
+  if (code === 0) return "Clear";
+  if (code <= 3) return "Partly Cloudy";
+  if (code <= 48) return "Foggy";
+  if (code <= 55) return "Drizzle";
+  if (code <= 65) return "Rain";
+  if (code <= 77) return "Snow";
+  if (code <= 82) return "Showers";
+  return "Stormy";
+}
+
+function windDirLabel(deg) {
+  const dirs = ["N","NE","E","SE","S","SW","W","NW"];
+  return dirs[Math.round(deg / 45) % 8];
+}
+
+// Bearing in degrees (0=N, 90=E) from point a to point b
+function bearingTo(a, b) {
+  const dLng = (b.lng - a.lng) * Math.PI / 180;
+  const lat1 = a.lat * Math.PI / 180;
+  const lat2 = b.lat * Math.PI / 180;
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+// Returns yards to add (positive = headwind, negative = tailwind)
+function windAdjustmentYards(windSpeed, windDir, shotBearing) {
+  const windToward = (windDir + 180) % 360;
+  const angle = (shotBearing - windToward) * Math.PI / 180;
+  const component = windSpeed * Math.cos(angle);
+  return Math.round(component > 0 ? component * 1.0 : component * 0.7);
+}
+
+// ─── Leaflet icon fix ─────────────────────────────────────────────────────────
+if (typeof window !== "undefined") {
+  delete L.Icon.Default.prototype._getIconUrl;
+  L.Icon.Default.mergeOptions({
+    iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+    iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+    shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+  });
+}
+
+const CLUBS = ["Driver","3 Wood","Hybrid","4 Iron","5 Iron","6 Iron","7 Iron","8 Iron","9 Iron","PW","SW","Putter"];
+const SHOT_SHAPES = ["Straight","Fade","Draw","Slice","Hook","Punch","Chip","Putt"];
+const LIES = ["Tee","Fairway","Rough","Sand","Recovery","Green"];
+const RESULTS = ["Good","Left","Right","Short","Long","Lost","Penalty"];
+const HOLES = Array.from({ length: 18 }, (_, i) => i + 1);
+
+function makeNumberIcon(number, type = "end") {
+  const isStart = type === "start";
+  const bg = isStart ? "#34d399" : "#f0c14b";
+  const label = isStart ? "S" : number;
+  return L.divIcon({
+    className: "tracerbuddy-map-pin",
+    html: `<div style="width:28px;height:28px;border-radius:999px;background:${bg};color:#06120d;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:12px;border:2px solid white;box-shadow:0 8px 18px rgba(0,0,0,.35);">${label}</div>`,
+    iconSize: [28, 28], iconAnchor: [14, 14], popupAnchor: [0, -14],
+  });
+}
+
+function makeCurrentIcon() {
+  return L.divIcon({
+    className: "tracerbuddy-current-pin",
+    html: `<div style="width:34px;height:34px;border-radius:999px;background:#ffffff;color:#06120d;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:15px;border:3px solid #f0c14b;box-shadow:0 10px 24px rgba(0,0,0,.4);">📍</div>`,
+    iconSize: [34, 34], iconAnchor: [17, 17], popupAnchor: [0, -17],
+  });
+}
+
+function makeGreenIcon() {
+  return L.divIcon({
+    className: "tracerbuddy-green-pin",
+    html: `<div style="width:30px;height:30px;border-radius:999px;background:#16a34a;color:white;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:14px;border:2px solid white;box-shadow:0 8px 18px rgba(0,0,0,.35);">⛳</div>`,
+    iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -15],
+  });
+}
+
+function yardsBetween(a, b) {
+  if (!a || !b) return 0;
+  const R = 6371e3;
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const x = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
+  return Math.round(R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x)) * 1.09361);
+}
+
+function getLocation() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) { reject(new Error("GPS not supported.")); return; }
+    navigator.geolocation.getCurrentPosition(
+      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: Math.round(p.coords.accuracy), time: new Date().toISOString() }),
+      reject,
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+    );
+  });
+}
+
+function formatTime(v) {
+  try { return new Date(v).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch { return ""; }
+}
+
+function Card({ children, className = "" }) {
+  return <div className={"rounded-[1.75rem] border border-white/10 bg-white/[0.065] text-white shadow-xl backdrop-blur " + className}>{children}</div>;
+}
+
+function PillButton({ active, children, onClick, tone = "gold", suggested = false }) {
+  const ac = tone === "green" ? "bg-emerald-300 text-[#06120d]" : tone === "white" ? "bg-white text-[#06120d]" : "bg-amber-300 text-[#06120d]";
+  const suggestedInactive = "bg-emerald-900/60 text-emerald-200 border border-emerald-400/50";
+  let cls;
+  if (active) cls = ac + (suggested ? " ring-2 ring-emerald-300 ring-offset-1 ring-offset-[#03100b]" : "");
+  else if (suggested) cls = suggestedInactive;
+  else cls = "bg-white/10 text-white/70";
+  return (
+    <button onClick={onClick} className={"relative rounded-2xl px-3 py-2.5 text-[11px] font-black transition active:scale-95 " + cls}>
+      {suggested && <span style={{position:"absolute",top:"-5px",right:"-4px",background:"#6ee7b7",color:"#06120d",fontSize:"9px",fontWeight:900,borderRadius:"999px",padding:"1px 4px",lineHeight:1.4}}>★</span>}
+      {children}
+    </button>
+  );
+}
+
+function TabButton({ active, icon, label, onClick }) {
+  return <button onClick={onClick} className={"rounded-2xl px-2 py-2 text-[10px] font-black transition active:scale-95 sm:text-[11px] " + (active ? "bg-amber-300 text-[#06120d]" : "text-white/55")}><span className="mr-1">{icon}</span>{label}</button>;
+}
+
+function StatCard({ label, value }) {
+  return <Card className="p-3"><p className="text-[10px] uppercase tracking-[0.14em] text-white/45">{label}</p><p className="mt-1 text-xl font-black">{value}</p></Card>;
+}
+
+function RecenterMap({ center, zoom = 17, enabled = true }) {
+  const map = useMap();
+  useEffect(() => { if (center && enabled) map.setView(center, zoom, { animate: true }); }, [center, zoom, map, enabled]);
+  return null;
+}
+
+function FitShotBounds({ shots, currentShot, enabled = true }) {
+  const map = useMap();
+  useEffect(() => {
+    if (!enabled) return;
+    const pts = [];
+    if (currentShot?.start) pts.push([currentShot.start.lat, currentShot.start.lng]);
+    shots.forEach((s) => {
+      if (s.start) pts.push([s.start.lat, s.start.lng]);
+      if (s.end) pts.push([s.end.lat, s.end.lng]);
+    });
+    if (pts.length >= 2) map.fitBounds(pts, { padding: [40, 40], maxZoom: 18 });
+  }, [shots, currentShot, enabled, map]);
+  return null;
+}
+
+// ─── Course Search Panel ──────────────────────────────────────────────────────
+function CourseSearchPanel({ onCourseSelected, selectedCourse }) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSearch() {
+    if (!query.trim()) return;
+    setLoading(true); setError(""); setResults([]);
+    try {
+      const data = await apiSearchCourses(query.trim());
+      const list = data.courses ?? data.results ?? data ?? [];
+      setResults(Array.isArray(list) ? list.slice(0, 6) : []);
+      if (!list.length) setError("No courses found. Try a different name.");
+    } catch { setError("Search failed. Check your connection and try again."); }
+    finally { setLoading(false); }
+  }
+
+  async function handleSelect(r) {
+    const id = r.id ?? r.course_id ?? r.courseId;
+    setLoading(true); setError("");
+    try {
+      if (id) {
+        const detail = await apiFetchCourse(id);
+        onCourseSelected({ raw: r, detail, holes: extractHoles(detail) });
+      } else {
+        onCourseSelected({ raw: r, holes: [] });
+      }
+      setResults([]); setQuery("");
+    } catch { setError("Could not load course data. Try again."); }
+    finally { setLoading(false); }
+  }
+
+  if (selectedCourse) {
+    return (
+      <div className="mb-4 rounded-[1.5rem] border border-emerald-400/30 bg-emerald-400/10 p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-300">Course Loaded ✓</p>
+            <p className="mt-0.5 font-black">{extractCourseName(selectedCourse.raw)}</p>
+            <p className="text-xs text-white/50">
+              {selectedCourse.holes.length > 0 ? `${selectedCourse.holes.length} holes · Live distance to pin active` : "Loaded · No GPS hole data from API"}
+            </p>
+          </div>
+          <button onClick={() => onCourseSelected(null)} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold text-white/70 active:scale-95">Change</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-4">
+      <p className="mb-2 text-[10px] font-black uppercase tracking-[0.22em] text-white/40">Find Your Course (Optional)</p>
+      <div className="flex gap-2">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+          placeholder="e.g. Carlisle Country Club"
+          className="flex-1 rounded-2xl border border-white/10 bg-white/10 px-4 py-3 text-sm text-white placeholder:text-white/35 outline-none"
+        />
+        <button onClick={handleSearch} disabled={loading} className="h-12 w-12 rounded-2xl bg-amber-300 text-lg font-black text-[#06120d] disabled:opacity-50 active:scale-95">
+          {loading ? "…" : "🔍"}
+        </button>
+      </div>
+      {error && <p className="mt-2 text-xs text-red-300">{error}</p>}
+      {results.length > 0 && (
+        <div className="mt-2 space-y-2">
+          {results.map((r, i) => (
+            <button key={r.id ?? i} onClick={() => handleSelect(r)} className="w-full rounded-2xl border border-white/10 bg-white/5 p-3 text-left active:scale-[0.98]">
+              <p className="text-sm font-black">{extractCourseName(r)}</p>
+              <p className="text-xs text-white/45">{r.location?.city ? `${r.location.city}, ` : ""}{r.location?.state ?? r.city ?? ""}</p>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Sparkline chart ─────────────────────────────────────────────────────────
+function Sparkline({ data, color = "#f0c14b", height = 56, invert = false }) {
+  if (!data || data.length < 2) return <div style={{ height }} className="flex items-center justify-center text-xs text-white/25">Not enough data yet</div>;
+  const W = 300; const H = height;
+  const min = Math.min(...data); const max = Math.max(...data);
+  const range = max - min || 1;
+  const pad = 6;
+  const pts = data.map((v, i) => {
+    const x = (i / (data.length - 1)) * (W - pad * 2) + pad;
+    const norm = invert ? 1 - (v - min) / range : (v - min) / range;
+    const y = H - pad - norm * (H - pad * 2);
+    return [x, y];
+  });
+  const polyline = pts.map(([x, y]) => `${x},${y}`).join(" ");
+  const last = pts[pts.length - 1];
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height }} preserveAspectRatio="none">
+      <polyline points={polyline} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+      {pts.map(([x, y], i) => <circle key={i} cx={x} cy={y} r="3" fill={color} />)}
+      <circle cx={last[0]} cy={last[1]} r="5" fill={color} />
+    </svg>
+  );
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+export default function TracerBuddyApp() {
+  const [roundStarted, setRoundStarted] = useState(false);
+  const [activeTab, setActiveTab] = useState("track");
+  const [club, setClub] = useState("Driver");
+  const [shotShape, setShotShape] = useState("Straight");
+  const [lie, setLie] = useState("Tee");
+  const [result, setResult] = useState("Good");
+  const [note, setNote] = useState("");
+  const [currentShot, setCurrentShot] = useState(null);
+  const [shots, setShots] = useState([]);
+  const [scores, setScores] = useState(() => Object.fromEntries(HOLES.map((h) => [h, { par: 4, strokes: "" }])));
+  const [status, setStatus] = useState("Ready when you are.");
+  const [loading, setLoading] = useState(false);
+  const [hole, setHole] = useState(1);
+  const [mapMode, setMapMode] = useState("hole");
+  const [autoFitMap, setAutoFitMap] = useState(true);
+  const [selectedCourse, setSelectedCourse] = useState(null);
+  const [livePosition, setLivePosition] = useState(null);
+  const [allTimeShots, setAllTimeShots] = useState([]);
+  const [roundHistory, setRoundHistory] = useState([]);
+  const [weatherData, setWeatherData] = useState(null);
+  const [weatherLoading, setWeatherLoading] = useState(false);
+  const [shareRound, setShareRound] = useState(null);
+  const watchRef = useRef(null);
+
+  useEffect(() => {
+    const s = localStorage.getItem("tracerbuddy_shots");
+    const sc = localStorage.getItem("tracerbuddy_scores");
+    const r = localStorage.getItem("tracerbuddy_round_started");
+    const h = localStorage.getItem("tracerbuddy_hole");
+    const c = localStorage.getItem("tracerbuddy_selected_course");
+    if (s) setShots(JSON.parse(s));
+    if (sc) setScores(JSON.parse(sc));
+    if (r === "true") setRoundStarted(true);
+    if (h) setHole(Number(h));
+    if (c) setSelectedCourse(JSON.parse(c));
+    const at = localStorage.getItem("tracerbuddy_all_time_shots");
+    if (at) setAllTimeShots(JSON.parse(at));
+    const rh = localStorage.getItem("tracerbuddy_round_history");
+    if (rh) setRoundHistory(JSON.parse(rh));
+  }, []);
+
+  useEffect(() => localStorage.setItem("tracerbuddy_shots", JSON.stringify(shots)), [shots]);
+  useEffect(() => localStorage.setItem("tracerbuddy_scores", JSON.stringify(scores)), [scores]);
+  useEffect(() => localStorage.setItem("tracerbuddy_all_time_shots", JSON.stringify(allTimeShots)), [allTimeShots]);
+  useEffect(() => localStorage.setItem("tracerbuddy_round_history", JSON.stringify(roundHistory)), [roundHistory]);
+  useEffect(() => { localStorage.setItem("tracerbuddy_round_started", String(roundStarted)); localStorage.setItem("tracerbuddy_hole", String(hole)); }, [roundStarted, hole]);
+  useEffect(() => { if (selectedCourse) localStorage.setItem("tracerbuddy_selected_course", JSON.stringify(selectedCourse)); else localStorage.removeItem("tracerbuddy_selected_course"); }, [selectedCourse]);
+
+  // Fetch weather when not in a round (pre-round screen)
+  useEffect(() => {
+    if (roundStarted || !navigator.geolocation) return;
+    setWeatherLoading(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const data = await fetchWeatherAndElevation(pos.coords.latitude, pos.coords.longitude);
+          setWeatherData(data);
+        } catch { /* silent fail — weather is nice-to-have */ }
+        finally { setWeatherLoading(false); }
+      },
+      () => setWeatherLoading(false),
+      { enableHighAccuracy: false, timeout: 8000 }
+    );
+  }, [roundStarted]);
+
+  // Adjusted distance: raw pin distance corrected for elevation + wind
+  const adjustedDistance = useMemo(() => {
+    if (distanceToPin == null) return null;
+    let adj = distanceToPin;
+    // Elevation: ball flies ~2% farther per 1000ft — need less club
+    if (weatherData?.elevationFt) {
+      const mult = 1 + (weatherData.elevationFt / 1000) * 0.02;
+      adj = Math.round(adj / mult);
+    }
+    // Wind: need bearing from player to pin
+    if (weatherData?.windSpeed > 2 && livePosition && greenLocation) {
+      const bearing = bearingTo(livePosition, greenLocation);
+      adj += windAdjustmentYards(weatherData.windSpeed, weatherData.windDir, bearing);
+    }
+    return adj;
+  }, [distanceToPin, weatherData, livePosition, greenLocation]);
+    if (!roundStarted || !navigator.geolocation) return;
+    watchRef.current = navigator.geolocation.watchPosition(
+      (p) => setLivePosition({ lat: p.coords.latitude, lng: p.coords.longitude }),
+      null,
+      { enableHighAccuracy: true, maximumAge: 3000, timeout: 15000 }
+    );
+    return () => { if (watchRef.current != null) navigator.geolocation.clearWatch(watchRef.current); };
+  }, [roundStarted]);
+
+  const currentHoleData = useMemo(() => {
+    if (!selectedCourse?.holes?.length) return null;
+    return selectedCourse.holes.find((h) => Number(h.hole_number ?? h.holeNumber ?? h.number ?? h.hole) === hole) ?? null;
+  }, [selectedCourse, hole]);
+
+  const greenLocation = useMemo(() => extractGreen(currentHoleData), [currentHoleData]);
+
+  const distanceToPin = useMemo(() => {
+    if (!livePosition || !greenLocation) return null;
+    return yardsBetween(livePosition, greenLocation);
+  }, [livePosition, greenLocation]);
+
+  const totalDistance = useMemo(() => shots.reduce((sum, s) => sum + (s.distance || 0), 0), [shots]);
+  const longest = useMemo(() => shots.reduce((best, s) => (s.distance > (best?.distance || 0) ? s : best), null), [shots]);
+  const avgDistance = useMemo(() => (shots.length ? Math.round(totalDistance / shots.length) : 0), [shots, totalDistance]);
+  const goodRate = useMemo(() => shots.length ? Math.round((shots.filter((s) => s.result === "Good").length / shots.length) * 100) : 0, [shots]);
+
+  const scoreTotals = useMemo(() => {
+    let strokes = 0, played = 0, playedPar = 0;
+    HOLES.forEach((h) => {
+      const row = scores[h] || { par: 4, strokes: "" };
+      const s = Number(row.strokes);
+      if (s > 0) { strokes += s; played++; playedPar += Number(row.par) || 4; }
+    });
+    return { strokes, played, toPar: strokes ? strokes - playedPar : 0 };
+  }, [scores]);
+
+  const clubStats = useMemo(() => CLUBS.map((name) => {
+    const list = shots.filter((s) => s.club === name && s.distance > 0);
+    const avg = list.length ? Math.round(list.reduce((sum, s) => sum + s.distance, 0) / list.length) : 0;
+    const best = list.reduce((max, s) => Math.max(max, s.distance), 0);
+    return { name, count: list.length, avg, best };
+  }).filter((r) => r.count > 0), [shots]);
+
+  // Default distances used until personal data builds up (min 3 shots per club)
+  const DEFAULT_CLUB_DISTANCES = {
+    "Driver": 230, "3 Wood": 210, "Hybrid": 190, "4 Iron": 175,
+    "5 Iron": 165, "6 Iron": 155, "7 Iron": 145, "8 Iron": 135,
+    "9 Iron": 125, "PW": 110, "SW": 85, "Putter": 15,
+  };
+  const MIN_SHOTS_FOR_SUGGESTION = 3;
+
+  const clubAverages = useMemo(() => {
+    const map = {};
+    CLUBS.forEach((name) => {
+      const list = allTimeShots.filter((s) => s.club === name && s.distance > 0);
+      if (list.length >= MIN_SHOTS_FOR_SUGGESTION) {
+        map[name] = Math.round(list.reduce((sum, s) => sum + s.distance, 0) / list.length);
+      } else {
+        map[name] = DEFAULT_CLUB_DISTANCES[name];
+      }
+    });
+    return map;
+  }, [allTimeShots]);
+
+  // true = using personal data, false = still on defaults
+  const clubDataSource = useMemo(() => {
+    const personal = {};
+    CLUBS.forEach((name) => {
+      const list = allTimeShots.filter((s) => s.club === name && s.distance > 0);
+      personal[name] = list.length >= MIN_SHOTS_FOR_SUGGESTION;
+    });
+    return personal;
+  }, [allTimeShots]);
+
+  const suggestedClub = useMemo(() => {
+    const target = adjustedDistance ?? distanceToPin;
+    if (target == null) return null;
+    const eligible = CLUBS.filter((c) => c !== "Putter" || target < 30);
+    let best = null;
+    let bestDiff = Infinity;
+    eligible.forEach((name) => {
+      const avg = clubAverages[name];
+      if (avg == null) return;
+      const diff = Math.abs(avg - target);
+      if (diff < bestDiff) { bestDiff = diff; best = name; }
+    });
+    return best;
+  }, [adjustedDistance, distanceToPin, clubAverages]);
+
+  const hasEnoughDataForSuggestions = Object.keys(clubAverages).length > 0;
+
+  // Club gapping — needs personal data (min 3 shots per club)
+  const clubGaps = useMemo(() => {
+    const withData = CLUBS.map((name) => {
+      const list = allTimeShots.filter((s) => s.club === name && s.distance > 0);
+      if (list.length < MIN_SHOTS_FOR_SUGGESTION) return null;
+      const avg = Math.round(list.reduce((sum, s) => sum + s.distance, 0) / list.length);
+      return { name, avg, count: list.length };
+    }).filter(Boolean).sort((a, b) => b.avg - a.avg);
+    const gaps = [];
+    for (let i = 0; i < withData.length - 1; i++) {
+      const gap = withData[i].avg - withData[i + 1].avg;
+      if (gap > 20) gaps.push({ high: withData[i], low: withData[i + 1], gap });
+    }
+    return { clubs: withData, gaps };
+  }, [allTimeShots]);
+
+  // Stat trends across rounds (last 10)
+  const statTrends = useMemo(() => {
+    const rounds = [...roundHistory].reverse().slice(0, 10);
+    return {
+      toPar: rounds.filter((r) => r.strokes > 0).map((r) => r.toPar),
+      longestDrive: rounds.filter((r) => r.longestDrive > 0).map((r) => r.longestDrive),
+      goodPct: rounds.map((r) => {
+        const roundShots = allTimeShots.filter((s) => {
+          const d = new Date(s.finishedAt ?? s.startedAt);
+          const rd = new Date(r.date);
+          return Math.abs(d - rd) < 1000 * 60 * 60 * 24;
+        });
+        if (!roundShots.length) return null;
+        return Math.round((roundShots.filter((s) => s.result === "Good").length / roundShots.length) * 100);
+      }).filter((v) => v !== null),
+      labels: rounds.map((r) => new Date(r.date).toLocaleDateString([], { month: "short", day: "numeric" })),
+    };
+  }, [roundHistory, allTimeShots]);
+
+  const lastLocation = currentShot?.start || shots[0]?.end || shots[0]?.start;
+  const mapCenter = lastLocation ? [lastLocation.lat, lastLocation.lng] : [40.2015, -77.1890];
+  const visibleShots = useMemo(() => mapMode === "hole" ? shots.filter((s) => s.hole === hole) : shots, [shots, hole, mapMode]);
+  const shotLines = useMemo(() => visibleShots.filter((s) => s.start && s.end).map((s) => ({ id: s.id, positions: [[s.start.lat, s.start.lng], [s.end.lat, s.end.lng]] })), [visibleShots]);
+  const visibleDistance = useMemo(() => visibleShots.reduce((sum, s) => sum + (s.distance || 0), 0), [visibleShots]);
+
+  function handleCourseSelected(course) {
+    setSelectedCourse(course);
+    if (course?.holes?.length) {
+      setScores((prev) => {
+        const updated = { ...prev };
+        course.holes.forEach((h) => {
+          const n = Number(h.hole_number ?? h.holeNumber ?? h.number ?? h.hole);
+          if (n >= 1 && n <= 18) updated[n] = { ...updated[n], par: extractPar(h) };
+        });
+        return updated;
+      });
+    }
+  }
+
+  function startRound() { setRoundStarted(true); setActiveTab("track"); setStatus("Round started. Choose your club and tap Hit Shot."); }
+
+  async function hitShot() {
+    setLoading(true); setStatus("Locking your hit position...");
+    try {
+      const loc = await getLocation();
+      setCurrentShot({ id: crypto.randomUUID(), club, shotShape, lie, result, note, hole, start: loc, startedAt: loc.time });
+      setStatus(`Shot marked with ${club}. Walk to your ball, then tap Ball Found Here.`);
+    } catch { setStatus("GPS failed. Turn on location permission and try again."); }
+    finally { setLoading(false); }
+  }
+
+  async function ballFound() {
+    if (!currentShot) { setStatus("Tap Hit Shot first before marking where the ball landed."); return; }
+    setLoading(true); setStatus("Locking ball location...");
+    try {
+      const end = await getLocation();
+      const distance = yardsBetween(currentShot.start, end);
+      setShots((prev) => [{ ...currentShot, result, note, end, distance, finishedAt: end.time }, ...prev]);
+      setCurrentShot(null); setNote("");
+      setStatus(`${currentShot.club} saved: ${distance} yards.`);
+    } catch { setStatus("GPS failed. Stand still for a second and try again."); }
+    finally { setLoading(false); }
+  }
+
+  function openMaps(point) { if (!point) return; window.open(`https://www.google.com/maps/search/?api=1&query=${point.lat},${point.lng}`, "_blank"); }
+  function lostBall() { if (!currentShot) { setStatus("No active shot. Tap Hit Shot first."); return; } openMaps(currentShot.start); setStatus("Opened last hit location in Maps."); }
+
+  function clearRound() {
+    const completedShots = shots.filter((s) => s.distance > 0);
+    if (completedShots.length > 0) {
+      setAllTimeShots((prev) => [...prev, ...completedShots]);
+    }
+    // Save round summary to history
+    if (scoreTotals.played > 0 || completedShots.length > 0) {
+      const longestShot = completedShots.reduce((best, s) => s.distance > (best?.distance || 0) ? s : best, null);
+      const summary = {
+        id: crypto.randomUUID(),
+        date: new Date().toISOString(),
+        courseName: selectedCourse ? extractCourseName(selectedCourse.raw) : "Unknown Course",
+        holesPlayed: scoreTotals.played,
+        strokes: scoreTotals.strokes,
+        toPar: scoreTotals.toPar,
+        shotsTracked: completedShots.length,
+        longestDrive: longestShot?.distance ?? 0,
+        longestClub: longestShot?.club ?? "",
+        elevationFt: weatherData?.elevationFt ?? null,
+      };
+      setRoundHistory((prev) => [summary, ...prev]);
+    }
+    setShots([]); setCurrentShot(null); setHole(1);
+    setScores(Object.fromEntries(HOLES.map((h) => [h, { par: 4, strokes: "" }])));
+    setSelectedCourse(null); setRoundStarted(false); setActiveTab("track"); setStatus("Ready when you are.");
+    ["tracerbuddy_shots","tracerbuddy_scores","tracerbuddy_round_started","tracerbuddy_hole","tracerbuddy_selected_course"].forEach((k) => localStorage.removeItem(k));
+  }
+
+  function updateScore(h, field, value) { setScores((prev) => ({ ...prev, [h]: { ...(prev[h] || { par: 4, strokes: "" }), [field]: value } })); }
+
+  // ── Pre-round screen ──────────────────────────────────────────────────────
+  if (!roundStarted) {
+    return (
+      <div className="min-h-screen bg-[#03100b] px-4 py-6 text-white">
+        <div className="mx-auto flex min-h-[calc(100vh-3rem)] max-w-md flex-col justify-between">
+          <div>
+            <div className="mb-6 flex items-center justify-between pt-2">
+              <div>
+                <div className="text-3xl font-black tracking-tight"><span className="text-emerald-300">Tracer</span><span className="text-amber-300">Buddy</span></div>
+                <p className="text-sm text-white/55">The smarter way to track every shot.</p>
+              </div>
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-300 text-2xl shadow-lg shadow-amber-900/30">⛳</div>
+            </div>
+
+            <Card className="overflow-hidden p-0 mb-4">
+              <div className="bg-gradient-to-br from-emerald-400/25 via-white/5 to-amber-300/20 p-5">
+                <div className="mb-4 flex h-20 items-center justify-center rounded-[1.5rem] border border-white/10 bg-black/20 text-5xl">🎯</div>
+                <h1 className="text-3xl font-black leading-tight">Ready for the course?</h1>
+                <p className="mt-2 text-sm leading-6 text-white/65">Track shots, live distance to pin, satellite map, and full stats.</p>
+              </div>
+            </Card>
+
+            <CourseSearchPanel onCourseSelected={handleCourseSelected} selectedCourse={selectedCourse} />
+
+            {/* Weather card */}
+            {(weatherData || weatherLoading) && (
+              <div className="mb-4 rounded-[1.5rem] border border-white/10 bg-white/[0.065] p-4">
+                {weatherLoading ? (
+                  <p className="text-xs text-white/40 text-center">Fetching course conditions...</p>
+                ) : weatherData && (
+                  <>
+                    <p className="text-[10px] font-black uppercase tracking-[0.18em] text-white/40 mb-2">Course Conditions</p>
+                    <div className="grid grid-cols-4 gap-2">
+                      <div className="rounded-2xl bg-black/25 p-2 text-center">
+                        <p className="text-[9px] text-white/40">WIND</p>
+                        <p className="text-sm font-black text-white">{weatherData.windSpeed}mph</p>
+                      </div>
+                      <div className="rounded-2xl bg-black/25 p-2 text-center">
+                        <p className="text-[9px] text-white/40">DIR</p>
+                        <p className="text-sm font-black text-white">{windDirLabel(weatherData.windDir)}</p>
+                      </div>
+                      <div className="rounded-2xl bg-black/25 p-2 text-center">
+                        <p className="text-[9px] text-white/40">TEMP</p>
+                        <p className="text-sm font-black text-white">{weatherData.tempF}°F</p>
+                      </div>
+                      <div className="rounded-2xl bg-black/25 p-2 text-center">
+                        <p className="text-[9px] text-white/40">ELEV</p>
+                        <p className="text-sm font-black text-white">{weatherData.elevationFt}ft</p>
+                      </div>
+                    </div>
+                    <p className="mt-2 text-center text-xs text-white/40">{weatherCodeLabel(weatherData.weatherCode)} · Adjustments applied to club suggestions</p>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="pb-4">
+            <button onClick={startRound} className="h-16 w-full rounded-[1.4rem] bg-amber-300 text-lg font-black text-[#06120d] shadow-xl shadow-amber-900/30 active:scale-95">
+              Start Round
+            </button>
+            <p className="mt-3 text-center text-xs text-white/40">Best used outdoors with location permission on.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Main round screen ─────────────────────────────────────────────────────
+  return (
+    <div className="min-h-screen bg-[#03100b] text-white">
+      <div className="mx-auto max-w-md">
+
+        <div className="sticky top-0 z-20 border-b border-white/10 bg-[#03100b]/95 px-4 pb-3 pt-4 backdrop-blur">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-2xl font-black tracking-tight"><span className="text-emerald-300">Tracer</span><span className="text-amber-300">Buddy</span></div>
+              <p className="text-xs text-white/50 truncate max-w-[200px]">{selectedCourse ? extractCourseName(selectedCourse.raw) : "No course loaded"}</p>
+            </div>
+            <div className="rounded-2xl border border-amber-300/30 bg-amber-300/10 px-3 py-2 text-sm font-black text-amber-200">Hole {hole}</div>
+          </div>
+          <div className="mt-3 grid grid-cols-4 gap-1 rounded-2xl bg-black/25 p-1">
+            <TabButton active={activeTab === "track"} icon="📍" label="Track" onClick={() => setActiveTab("track")} />
+            <TabButton active={activeTab === "map"} icon="🗺️" label="Map" onClick={() => setActiveTab("map")} />
+            <TabButton active={activeTab === "score"} icon="⛳" label="Score" onClick={() => setActiveTab("score")} />
+            <TabButton active={activeTab === "history"} icon="📊" label="Stats" onClick={() => setActiveTab("history")} />
+          </div>
+        </div>
+
+        <main className="space-y-4 px-4 py-4 pb-8">
+
+          {activeTab === "track" && (
+            <>
+              {/* Distance to Pin */}
+              {greenLocation && (
+                <Card className="p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-[0.22em] text-white/40">Distance to Pin · Hole {hole}</p>
+                      <div className="mt-1 flex items-baseline gap-2">
+                        <span className="text-5xl font-black text-amber-300">{distanceToPin ?? "—"}</span>
+                        <span className="text-lg font-black text-white/50">yds</span>
+                      </div>
+                    </div>
+                    <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-400/15 text-4xl">⛳</div>
+                  </div>
+                  {currentHoleData && (
+                    <div className="mt-3 flex gap-2">
+                      <div className="flex-1 rounded-2xl bg-black/25 p-2 text-center">
+                        <p className="text-[9px] text-white/40">PAR</p>
+                        <p className="font-black">{extractPar(currentHoleData)}</p>
+                      </div>
+                      {(() => {
+                        const tb = currentHoleData.tee_boxes ?? currentHoleData.teeBoxes ?? currentHoleData.tees ?? [];
+                        const mens = Array.isArray(tb) ? (tb.find((t) => (t.tee_type ?? t.teeType ?? "").toLowerCase().includes("men")) ?? tb[0]) : null;
+                        const yards = mens?.yardage ?? mens?.distance ?? null;
+                        return yards ? (
+                          <div className="flex-1 rounded-2xl bg-black/25 p-2 text-center">
+                            <p className="text-[9px] text-white/40">HOLE LENGTH</p>
+                            <p className="font-black">{yards}y</p>
+                          </div>
+                        ) : null;
+                      })()}
+                      <div className="flex-1 rounded-2xl bg-black/25 p-2 text-center">
+                        <p className="text-[9px] text-white/40">GPS</p>
+                        <p className="font-black text-xs text-emerald-300">{livePosition ? "Live ●" : "—"}</p>
+                      </div>
+                    </div>
+                  )}
+                  {distanceToPin != null && (
+                    <div className="mt-3 rounded-2xl bg-black/20 px-3 py-2 text-center">
+                      {suggestedClub ? (
+                        <>
+                          <p className="text-xs font-black text-emerald-300">
+                            ★ Suggested: {suggestedClub} <span className="text-white/40 font-normal">({clubAverages[suggestedClub]}y · {clubDataSource[suggestedClub] ? "your avg" : "default"})</span>
+                          </p>
+                          {adjustedDistance != null && adjustedDistance !== distanceToPin && (
+                            <p className="text-[10px] text-white/35 mt-0.5">
+                              {distanceToPin}y pin → {adjustedDistance}y adjusted
+                              {weatherData?.elevationFt > 500 ? ` · elev ${weatherData.elevationFt}ft` : ""}
+                              {weatherData?.windSpeed > 2 ? ` · wind ${weatherData.windSpeed}mph ${windDirLabel(weatherData.windDir)}` : ""}
+                            </p>
+                          )}
+                        </>
+                      ) : (
+                        <p className="text-xs text-white/35">No suggestion available</p>
+                      )}
+                    </div>
+                  )}
+                </Card>
+              )}
+
+              <Card className="p-4">
+                <div className="mb-4 flex items-center justify-between rounded-[1.3rem] bg-black/20 p-2">
+                  <button onClick={() => setHole(Math.max(1, hole - 1))} className="h-11 w-14 rounded-2xl bg-white/10 text-xl font-black active:scale-95">−</button>
+                  <div className="text-center"><p className="text-[10px] font-bold uppercase tracking-[0.18em] text-white/40">Current Hole</p><p className="text-3xl font-black">{hole}</p></div>
+                  <button onClick={() => setHole(Math.min(18, hole + 1))} className="h-11 w-14 rounded-2xl bg-white/10 text-xl font-black active:scale-95">+</button>
+                </div>
+                <p className="mb-2 text-[10px] font-black uppercase tracking-[0.22em] text-white/40">Club</p>
+                <div className="grid grid-cols-3 gap-2">{CLUBS.map((item) => <PillButton key={item} active={club === item} suggested={suggestedClub === item} onClick={() => setClub(item)}>{item}</PillButton>)}</div>
+                <p className="mb-2 mt-4 text-[10px] font-black uppercase tracking-[0.22em] text-white/40">Shot Type</p>
+                <div className="grid grid-cols-4 gap-2">{SHOT_SHAPES.map((item) => <PillButton key={item} active={shotShape === item} tone="green" onClick={() => setShotShape(item)}>{item}</PillButton>)}</div>
+                <p className="mb-2 mt-4 text-[10px] font-black uppercase tracking-[0.22em] text-white/40">Lie</p>
+                <div className="grid grid-cols-3 gap-2">{LIES.map((item) => <PillButton key={item} active={lie === item} tone="white" onClick={() => setLie(item)}>{item}</PillButton>)}</div>
+              </Card>
+
+              <Card className="overflow-hidden p-0">
+                <div className="bg-gradient-to-br from-emerald-400/15 to-amber-300/10 p-5">
+                  <div className="mb-4 rounded-[1.4rem] border border-emerald-300/20 bg-[#082018] p-4 text-center">
+                    <div className="mb-2 text-5xl">🎯</div>
+                    <p className="font-black">GPS Shot Tracker</p>
+                    <p className="mt-1 text-xs leading-5 text-white/45">Stand still for a second when marking shots.</p>
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-black/25 p-3 text-sm text-white/75">{loading ? "Working..." : status}</div>
+                  <div className="mt-4">
+                    <p className="mb-2 text-[10px] font-black uppercase tracking-[0.22em] text-white/40">Result</p>
+                    <div className="grid grid-cols-4 gap-2">{RESULTS.map((item) => <PillButton key={item} active={result === item} onClick={() => setResult(item)}>{item}</PillButton>)}</div>
+                    <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional note: wind, contact, target..." className="mt-3 w-full rounded-2xl border border-white/10 bg-white/10 px-4 py-3 text-sm text-white placeholder:text-white/35 outline-none" />
+                  </div>
+                  <div className="mt-4 grid grid-cols-1 gap-3">
+                    <button disabled={loading} onClick={hitShot} className="h-14 rounded-[1.2rem] bg-emerald-400 text-sm font-black text-[#06120d] disabled:opacity-50 active:scale-95">📍 Hit Shot</button>
+                    <button disabled={loading} onClick={ballFound} className="h-14 rounded-[1.2rem] bg-amber-300 text-sm font-black text-[#06120d] disabled:opacity-50 active:scale-95">✅ Ball Found Here</button>
+                    <button onClick={lostBall} className="h-11 rounded-[1.1rem] border border-white/15 bg-white/10 text-xs font-bold text-white/80 active:scale-95">⚠ Lost Ball / Open Last Hit Spot</button>
+                  </div>
+                </div>
+              </Card>
+            </>
+          )}
+
+          {activeTab === "map" && (
+            <Card className="overflow-hidden p-0">
+              <div className="p-4">
+                <div className="mb-4 flex items-center justify-between">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.22em] text-white/45">Satellite Map</p>
+                    <h2 className="text-2xl font-black">{mapMode === "hole" ? `Hole ${hole}` : "Full Round"}</h2>
+                  </div>
+                  <div className="rounded-2xl bg-black/30 px-3 py-2 text-xs font-black text-amber-200">GPS ±{lastLocation?.accuracy || "—"}m</div>
+                </div>
+
+                {distanceToPin != null && (
+                  <div className="mb-3 flex items-center justify-between rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-3">
+                    <span className="text-xs font-black text-emerald-300">Distance to Pin</span>
+                    <span className="text-2xl font-black text-amber-300">{distanceToPin} yds</span>
+                  </div>
+                )}
+
+                <div className="mb-3 grid grid-cols-3 gap-2">
+                  <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] text-white/45">Shots</p><p className="text-lg font-black">{visibleShots.length}</p></div>
+                  <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] text-white/45">Lines</p><p className="text-lg font-black">{shotLines.length}</p></div>
+                  <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] text-white/45">Yards</p><p className="text-lg font-black">{visibleDistance || "—"}</p></div>
+                </div>
+
+                <div className="mb-3 grid grid-cols-2 gap-2 rounded-2xl bg-black/25 p-1">
+                  <button onClick={() => setMapMode("hole")} className={"rounded-xl py-2 text-xs font-black " + (mapMode === "hole" ? "bg-amber-300 text-[#06120d]" : "text-white/60")}>Current Hole</button>
+                  <button onClick={() => setMapMode("round")} className={"rounded-xl py-2 text-xs font-black " + (mapMode === "round" ? "bg-amber-300 text-[#06120d]" : "text-white/60")}>Full Round</button>
+                </div>
+
+                <div className="mb-3 grid grid-cols-2 gap-2 rounded-2xl bg-black/25 p-1">
+                  <button onClick={() => setAutoFitMap(true)} className={"rounded-xl py-2 text-xs font-black " + (autoFitMap ? "bg-emerald-300 text-[#06120d]" : "text-white/60")}>Auto Fit</button>
+                  <button onClick={() => setAutoFitMap(false)} className={"rounded-xl py-2 text-xs font-black " + (!autoFitMap ? "bg-emerald-300 text-[#06120d]" : "text-white/60")}>Free Move</button>
+                </div>
+
+                <div className="overflow-hidden rounded-[1.4rem] border border-white/10 bg-black/25">
+                  <div style={{ height: 430, width: "100%" }}>
+                    <MapContainer center={mapCenter} zoom={17} scrollWheelZoom={true} style={{ height: "100%", width: "100%" }}>
+                      <TileLayer attribution="Tiles &copy; Esri" url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" />
+                      <RecenterMap center={mapCenter} zoom={17} enabled={!autoFitMap} />
+                      <FitShotBounds shots={visibleShots} currentShot={currentShot} enabled={autoFitMap} />
+
+                      {greenLocation && mapMode === "hole" && (
+                        <Marker icon={makeGreenIcon()} position={[greenLocation.lat, greenLocation.lng]}>
+                          <Popup>Hole {hole} Pin · Par {extractPar(currentHoleData)}{distanceToPin ? ` · ${distanceToPin} yds from you` : ""}</Popup>
+                        </Marker>
+                      )}
+
+                      {currentShot?.start && (
+                        <Marker icon={makeCurrentIcon()} position={[currentShot.start.lat, currentShot.start.lng]}>
+                          <Popup>Current shot start<br />{currentShot.club} · Hole {currentShot.hole}<br />GPS ±{currentShot.start.accuracy || "?"}m</Popup>
+                        </Marker>
+                      )}
+
+                      {visibleShots.map((s, i) => (
+                        <React.Fragment key={s.id}>
+                          {s.start && <Marker icon={makeNumberIcon(i+1,"start")} position={[s.start.lat,s.start.lng]}><Popup>Shot {i+1} start<br />{s.club} · Hole {s.hole}<br />{formatTime(s.startedAt)}</Popup></Marker>}
+                          {s.end && <Marker icon={makeNumberIcon(i+1,"end")} position={[s.end.lat,s.end.lng]}><Popup><strong>{s.club} · {s.distance} yards</strong><br />Hole {s.hole} · {s.result}<br />{s.shotShape} from {s.lie}</Popup></Marker>}
+                        </React.Fragment>
+                      ))}
+
+                      {shotLines.map((line) => (
+                        <Polyline key={line.id} positions={line.positions} pathOptions={{ color: "#f0c14b", weight: 5, opacity: 0.95, dashArray: "8 8" }} />
+                      ))}
+                    </MapContainer>
+                  </div>
+                </div>
+
+                <div className="mt-4 space-y-3">
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <p className="text-sm font-black">Last known point</p>
+                    <p className="mt-1 text-xs text-white/55">{lastLocation ? `${lastLocation.lat.toFixed(5)}, ${lastLocation.lng.toFixed(5)}` : "No GPS point yet. Mark a shot first."}</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button onClick={() => openMaps(lastLocation)} className="h-14 rounded-2xl bg-amber-300 text-sm font-black text-[#06120d] active:scale-95">Open Maps</button>
+                    <button onClick={lostBall} className="h-14 rounded-2xl bg-white/10 text-sm font-black text-white active:scale-95">Find Ball</button>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          )}
+
+          {activeTab === "score" && (
+            <>
+              <div className="grid grid-cols-3 gap-2">
+                <StatCard label="Played" value={scoreTotals.played} />
+                <StatCard label="Score" value={scoreTotals.strokes || "—"} />
+                <StatCard label="To Par" value={scoreTotals.strokes ? (scoreTotals.toPar > 0 ? `+${scoreTotals.toPar}` : scoreTotals.toPar) : "—"} />
+              </div>
+              <Card className="p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-black">Scorecard</h2>
+                    <p className="text-xs text-white/45">{selectedCourse ? "Pars loaded from course." : "Tap strokes after each hole."}</p>
+                  </div>
+                  <button onClick={() => setScores(Object.fromEntries(HOLES.map((h) => [h, { par: 4, strokes: "" }])))} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold text-white/70">Reset</button>
+                </div>
+                <div className="space-y-2">
+                  {HOLES.map((h) => {
+                    const row = scores[h] || { par: 4, strokes: "" };
+                    return (
+                      <div key={h} className="grid grid-cols-12 items-center gap-2 rounded-2xl bg-black/25 p-2 text-sm">
+                        <button onClick={() => setHole(h)} className={"col-span-2 h-10 rounded-xl font-black " + (hole === h ? "bg-amber-300 text-[#06120d]" : "bg-white/10 text-white")}>{h}</button>
+                        <label className="col-span-2 text-xs text-white/45">Par</label>
+                        <select value={row.par} onChange={(e) => updateScore(h, "par", Number(e.target.value))} className="col-span-3 h-10 rounded-xl border border-white/10 bg-[#102319] px-2 text-white outline-none">
+                          {[3,4,5].map((p) => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                        <label className="col-span-2 text-xs text-white/45">Strokes</label>
+                        <input value={row.strokes} onChange={(e) => updateScore(h, "strokes", e.target.value.replace(/[^0-9]/g,""))} inputMode="numeric" className="col-span-3 h-10 rounded-xl border border-white/10 bg-white/10 px-3 text-center font-black text-white outline-none" />
+                      </div>
+                    );
+                  })}
+                </div>
+              </Card>
+            </>
+          )}
+
+          {activeTab === "history" && (
+            <>
+              <div className="grid grid-cols-4 gap-2">
+                <StatCard label="Shots" value={shots.length} />
+                <StatCard label="Long" value={longest ? `${longest.distance}y` : "—"} />
+                <StatCard label="Avg" value={avgDistance ? `${avgDistance}y` : "—"} />
+                <StatCard label="Good" value={goodRate ? `${goodRate}%` : "—"} />
+              </div>
+              {clubStats.length > 0 && (
+                <Card className="p-4">
+                  <div className="mb-3 font-black">Club Averages</div>
+                  <div className="space-y-2">
+                    {clubStats.map((row) => (
+                      <div key={row.name} className="grid grid-cols-4 rounded-2xl bg-black/25 p-3 text-sm">
+                        <div className="col-span-2 font-bold">{row.name}</div>
+                        <div className="text-white/65">Avg {row.avg}y</div>
+                        <div className="text-right text-amber-200">Best {row.best}y</div>
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+              )}
+              <Card className="p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <div className="font-black"><span className="text-amber-300">↺</span> Shot History</div>
+                  <button onClick={clearRound} className="rounded-xl bg-red-500/15 px-3 py-2 text-xs font-bold text-red-200">🗑 End Round</button>
+                </div>
+                {shots.length === 0 ? (
+                  <p className="rounded-2xl bg-black/20 p-4 text-sm text-white/50">No shots saved yet. Go to Track and save your first shot.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {shots.map((s) => (
+                      <div key={s.id} className="rounded-2xl bg-black/25 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="font-black">{s.club} — {s.distance} yards</p>
+                            <p className="text-xs text-white/45">Hole {s.hole} · {s.shotShape} · {s.lie} · {s.result} · {formatTime(s.finishedAt)} · GPS ±{s.end?.accuracy || "?"}m</p>
+                            {s.note && <p className="mt-1 text-xs text-white/60">Note: {s.note}</p>}
+                          </div>
+                          <button onClick={() => openMaps(s.end)} className="rounded-xl bg-white/10 p-2 text-amber-200">➤</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Card>
+
+              {roundHistory.length > 0 && (
+                <Card className="p-4">
+                  <div className="mb-3 flex items-center justify-between">
+                    <div className="font-black">📅 Round History</div>
+                    <button onClick={() => { setRoundHistory([]); localStorage.removeItem("tracerbuddy_round_history"); }} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold text-white/50">Clear</button>
+                  </div>
+                  <div className="space-y-3">
+                    {roundHistory.map((r) => {
+                      const d = new Date(r.date);
+                      const dateStr = d.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+                      const toParStr = r.strokes ? (r.toPar === 0 ? "E" : r.toPar > 0 ? `+${r.toPar}` : `${r.toPar}`) : "—";
+                      const toParColor = r.toPar < 0 ? "text-emerald-300" : r.toPar > 0 ? "text-red-300" : "text-white";
+                      return (
+                        <div key={r.id} className="rounded-2xl bg-black/25 p-3">
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <div>
+                              <p className="font-black text-sm">{r.courseName}</p>
+                              <p className="text-xs text-white/45">{dateStr}</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <div className={`text-2xl font-black ${toParColor}`}>{toParStr}</div>
+                              <button onClick={() => setShareRound(r)} className="rounded-xl bg-amber-300/15 px-2 py-1.5 text-xs font-bold text-amber-200 active:scale-95">Share</button>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-4 gap-1.5">
+                            <div className="rounded-xl bg-black/30 p-2 text-center">
+                              <p className="text-[9px] text-white/40">HOLES</p>
+                              <p className="text-sm font-black">{r.holesPlayed}</p>
+                            </div>
+                            <div className="rounded-xl bg-black/30 p-2 text-center">
+                              <p className="text-[9px] text-white/40">SCORE</p>
+                              <p className="text-sm font-black">{r.strokes || "—"}</p>
+                            </div>
+                            <div className="rounded-xl bg-black/30 p-2 text-center">
+                              <p className="text-[9px] text-white/40">SHOTS</p>
+                              <p className="text-sm font-black">{r.shotsTracked}</p>
+                            </div>
+                            <div className="rounded-xl bg-black/30 p-2 text-center">
+                              <p className="text-[9px] text-white/40">LONG</p>
+                              <p className="text-sm font-black">{r.longestDrive ? `${r.longestDrive}y` : "—"}</p>
+                            </div>
+                          </div>
+                          {r.longestDrive > 0 && (
+                            <p className="mt-1.5 text-[10px] text-white/35">Longest: {r.longestClub} · {r.longestDrive}y{r.elevationFt ? ` · ${r.elevationFt}ft elevation` : ""}</p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              )}
+              {/* ── Club Gapping ── */}
+              {clubGaps.clubs.length >= 2 && (
+                <Card className="p-4">
+                  <div className="mb-1 font-black">📐 Club Gapping</div>
+                  <p className="text-xs text-white/45 mb-3">Based on your personal averages.</p>
+                  {clubGaps.gaps.length === 0 ? (
+                    <p className="text-xs text-emerald-300 rounded-2xl bg-emerald-900/20 p-3">Your bag looks well-gapped. No significant distance gaps found.</p>
+                  ) : (
+                    <div className="space-y-2 mb-3">
+                      {clubGaps.gaps.map((g, i) => (
+                        <div key={i} className="rounded-2xl bg-black/25 p-3 border border-amber-300/20">
+                          <div className="flex items-center justify-between mb-1">
+                            <p className="text-sm font-black text-amber-200">{g.gap}y gap</p>
+                            {g.gap > 30 && <span className="text-[10px] font-black bg-red-500/20 text-red-300 px-2 py-0.5 rounded-full">Significant</span>}
+                          </div>
+                          <p className="text-xs text-white/60">{g.high.name} ({g.high.avg}y) → {g.low.name} ({g.low.avg}y)</p>
+                          <p className="text-xs text-white/35 mt-1">Consider a club that carries ~{Math.round((g.high.avg + g.low.avg) / 2)}y</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="space-y-1.5">
+                    {clubGaps.clubs.map((c) => (
+                      <div key={c.name} className="flex items-center gap-2">
+                        <p className="w-20 text-xs text-white/60 flex-shrink-0">{c.name}</p>
+                        <div className="flex-1 h-2 rounded-full bg-white/10 overflow-hidden">
+                          <div className="h-full rounded-full bg-amber-300" style={{ width: `${Math.min(100, (c.avg / 280) * 100)}%` }} />
+                        </div>
+                        <p className="w-12 text-right text-xs font-black text-white/70">{c.avg}y</p>
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+              )}
+
+              {/* ── Stat Trends ── */}
+              {roundHistory.length >= 2 && (
+                <Card className="p-4">
+                  <div className="mb-1 font-black">📈 Trends</div>
+                  <p className="text-xs text-white/45 mb-4">Last {Math.min(10, roundHistory.length)} rounds.</p>
+                  <div className="space-y-5">
+                    {statTrends.toPar.length >= 2 && (
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <p className="text-xs font-black text-white/60">Score vs Par</p>
+                          <p className="text-xs text-white/40">{statTrends.toPar[statTrends.toPar.length - 1] >= 0 ? "+" : ""}{statTrends.toPar[statTrends.toPar.length - 1]} last round</p>
+                        </div>
+                        <Sparkline data={statTrends.toPar} color="#f0c14b" invert={true} />
+                        <p className="text-[10px] text-white/25 mt-1">Lower is better · trending up = improvement</p>
+                      </div>
+                    )}
+                    {statTrends.longestDrive.length >= 2 && (
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <p className="text-xs font-black text-white/60">Longest Drive</p>
+                          <p className="text-xs text-white/40">{statTrends.longestDrive[statTrends.longestDrive.length - 1]}y last round</p>
+                        </div>
+                        <Sparkline data={statTrends.longestDrive} color="#6ee7b7" />
+                        <p className="text-[10px] text-white/25 mt-1">Yards · trending up = longer drives</p>
+                      </div>
+                    )}
+                    {statTrends.goodPct.length >= 2 && (
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <p className="text-xs font-black text-white/60">Shot Accuracy</p>
+                          <p className="text-xs text-white/40">{statTrends.goodPct[statTrends.goodPct.length - 1]}% last round</p>
+                        </div>
+                        <Sparkline data={statTrends.goodPct} color="#a78bfa" />
+                        <p className="text-[10px] text-white/25 mt-1">% good shots · trending up = more consistent</p>
+                      </div>
+                    )}
+                  </div>
+                </Card>
+              )}
+            </>
+          )}
+        </main>
+      </div>
+
+      {/* ── Share Round Modal ── */}
+      {shareRound && (() => {
+        const r = shareRound;
+        const toParStr = r.strokes ? (r.toPar === 0 ? "E" : r.toPar > 0 ? `+${r.toPar}` : `${r.toPar}`) : "—";
+        const toParColor = r.toPar < 0 ? "#6ee7b7" : r.toPar > 0 ? "#f87171" : "#ffffff";
+        const dateStr = new Date(r.date).toLocaleDateString([], { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+        return (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: "24px" }}>
+            <div style={{ width: "100%", maxWidth: "360px" }}>
+              <div style={{ background: "#03100b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "28px", overflow: "hidden" }}>
+                <div style={{ background: "linear-gradient(135deg, rgba(52,211,153,0.25), rgba(251,191,36,0.2))", padding: "24px 24px 20px" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
+                    <div>
+                      <div style={{ fontSize: "22px", fontWeight: 900, letterSpacing: "-0.5px" }}>
+                        <span style={{ color: "#6ee7b7" }}>Tracer</span><span style={{ color: "#fcd34d" }}>Buddy</span>
+                      </div>
+                      <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.45)", margin: "2px 0 0" }}>Round Summary</p>
+                    </div>
+                    <div style={{ fontSize: "36px" }}>⛳</div>
+                  </div>
+                  <p style={{ fontSize: "17px", fontWeight: 900, color: "white", margin: "0 0 2px" }}>{r.courseName}</p>
+                  <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.45)", margin: 0 }}>{dateStr}</p>
+                </div>
+                <div style={{ padding: "20px 24px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <div>
+                      <p style={{ fontSize: "11px", fontWeight: 900, letterSpacing: "0.2em", color: "rgba(255,255,255,0.35)", textTransform: "uppercase", margin: "0 0 4px" }}>Score</p>
+                      <p style={{ fontSize: "52px", fontWeight: 900, color: "white", lineHeight: 1, margin: 0 }}>{r.strokes || "—"}</p>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <p style={{ fontSize: "11px", fontWeight: 900, letterSpacing: "0.2em", color: "rgba(255,255,255,0.35)", textTransform: "uppercase", margin: "0 0 4px" }}>To Par</p>
+                      <p style={{ fontSize: "52px", fontWeight: 900, color: toParColor, lineHeight: 1, margin: 0 }}>{toParStr}</p>
+                    </div>
+                  </div>
+                </div>
+                <div style={{ padding: "16px 24px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+                  {[
+                    { label: "Holes Played", value: r.holesPlayed },
+                    { label: "Shots Tracked", value: r.shotsTracked },
+                    { label: "Longest Drive", value: r.longestDrive ? `${r.longestDrive}y` : "—" },
+                    { label: "Best Club", value: r.longestClub || "—" },
+                  ].map((s) => (
+                    <div key={s.label} style={{ background: "rgba(255,255,255,0.06)", borderRadius: "14px", padding: "12px" }}>
+                      <p style={{ fontSize: "10px", color: "rgba(255,255,255,0.4)", textTransform: "uppercase", letterSpacing: "0.12em", margin: "0 0 3px" }}>{s.label}</p>
+                      <p style={{ fontSize: "18px", fontWeight: 900, color: "white", margin: 0 }}>{s.value}</p>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ padding: "0 24px 20px", textAlign: "center" }}>
+                  <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.25)", margin: 0 }}>Tracked with TracerBuddy</p>
+                </div>
+              </div>
+              <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.4)", textAlign: "center", margin: "14px 0 10px" }}>Screenshot the card above to share</p>
+              <button onClick={() => setShareRound(null)} style={{ width: "100%", height: "52px", background: "rgba(255,255,255,0.1)", border: "none", borderRadius: "18px", color: "white", fontSize: "15px", fontWeight: 900, cursor: "pointer" }}>
+                Close
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}

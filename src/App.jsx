@@ -3,13 +3,8 @@ import { MapContainer, Marker, Polyline, Popup, TileLayer, useMap } from "react-
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
-const GOLF_API_KEY = "YAHGWRREYXYA2FRGMXT2L7WSIA";
-const GOLF_API_BASE = "https://api.golfcourseapi.com/v1";
-
 async function apiSearchCourses(query) {
-  const res = await fetch(`${GOLF_API_BASE}/search?search_query=${encodeURIComponent(query)}`, {
-    headers: { Authorization: `Key ${GOLF_API_KEY}` },
-  });
+  const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
   if (!res.ok) throw new Error(res.status);
   return res.json();
 }
@@ -18,9 +13,7 @@ async function apiFetchCourse(id) {
   const k = `tracerbuddy_course_${id}`;
   const cached = localStorage.getItem(k);
   if (cached) return JSON.parse(cached);
-  const res = await fetch(`${GOLF_API_BASE}/courses/${id}`, {
-    headers: { Authorization: `Key ${GOLF_API_KEY}` },
-  });
+  const res = await fetch(`/api/course?id=${encodeURIComponent(id)}`);
   if (!res.ok) throw new Error(res.status);
   const data = await res.json();
   localStorage.setItem(k, JSON.stringify(data));
