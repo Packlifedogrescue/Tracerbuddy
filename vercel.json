@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    { "source": "/api/golfapi-search", "destination": "/api/golfapi-search.mjs" },
+    { "source": "/api/golfapi-course", "destination": "/api/golfapi-course.mjs" },
+    { "source": "/api/golfapi-club", "destination": "/api/golfapi-club.mjs" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
