@@ -201,7 +201,9 @@ function makePinSetIcon() {
     html: `<div style="width:32px;height:32px;border-radius:50%;background:#15803d;color:white;display:flex;align-items:center;justify-content:center;font-size:16px;border:2px solid white;box-shadow:0 4px 12px rgba(0,0,0,.3);">⛳</div>`,
     iconSize: [32, 32], iconAnchor: [16, 16],
   });
-}({ center, zoom = 17, enabled = true }) {
+}
+
+function RecenterMap({ center, zoom = 17, enabled = true }) {
   const map = useMap();
   useEffect(() => { if (center && enabled) map.setView(center, zoom, { animate: true }); }, [center, zoom, map, enabled]);
   return null;
