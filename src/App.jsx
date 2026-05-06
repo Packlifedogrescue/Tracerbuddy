@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { MapContainer, Marker, Polyline, Popup, TileLayer, useMap } from "react-leaflet";
+import { MapContainer, Marker, Polyline, Popup, TileLayer, useMap, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
@@ -186,8 +186,22 @@ function exportCSV(shots) {
   URL.revokeObjectURL(url);
 }
 
-// ── Map helpers ────────────────────────────────────────────────────────────────
-function RecenterMap({ center, zoom = 17, enabled = true }) {
+function MapClickHandler({ onMapClick, enabled }) {
+  useMapEvents({
+    click(e) {
+      if (enabled) onMapClick({ lat: e.latlng.lat, lng: e.latlng.lng });
+    },
+  });
+  return null;
+}
+
+function makePinSetIcon() {
+  return L.divIcon({
+    className: "",
+    html: `<div style="width:32px;height:32px;border-radius:50%;background:#15803d;color:white;display:flex;align-items:center;justify-content:center;font-size:16px;border:2px solid white;box-shadow:0 4px 12px rgba(0,0,0,.3);">⛳</div>`,
+    iconSize: [32, 32], iconAnchor: [16, 16],
+  });
+}({ center, zoom = 17, enabled = true }) {
   const map = useMap();
   useEffect(() => { if (center && enabled) map.setView(center, zoom, { animate: true }); }, [center, zoom, map, enabled]);
   return null;
@@ -405,6 +419,8 @@ export default function App() {
   const [splashOut, setSplashOut] = useState(false);
   const [pinDist, setPinDist] = useState(null);
   const [pinDistKey, setPinDistKey] = useState(0);
+  const [manualPin, setManualPin] = useState({});
+  const [pinSetMode, setPinSetMode] = useState(false);
   const pinAnimRef = useRef(null);
   const watchRef = useRef(null);
 
@@ -481,7 +497,7 @@ export default function App() {
     return course.holes.find((h) => Number(h.hole_number || h.holeNumber || h.number || h.hole) === hole) || null;
   }, [course, hole]);
 
-  const greenLoc = useMemo(() => extractGreen(holeData), [holeData]);
+  const greenLoc = useMemo(() => extractGreen(holeData) || manualPin[hole] || null, [holeData, manualPin, hole]);
 
   // Raw distance to pin
   const rawPinDist = useMemo(() => {
@@ -923,13 +939,28 @@ export default function App() {
                   </div>
                 </div>
 
-                <div style={{ borderRadius: 16, overflow: "hidden", border: "1px solid #e5e7eb" }}>
+                <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                  <button
+                    onClick={() => setPinSetMode((p) => !p)}
+                    style={{ flex: 1, height: 44, background: pinSetMode ? GREEN : "#fef3c7", border: `1px solid ${pinSetMode ? GREEN : "#fcd34d"}`, borderRadius: 12, fontSize: 13, fontWeight: 900, color: pinSetMode ? "white" : "#b45309", cursor: "pointer" }}
+                  >
+                    {pinSetMode ? "⛳ Tap map to set pin..." : `📍 Set Pin for Hole ${hole}`}
+                  </button>
+                  {manualPin[hole] && (
+                    <button
+                      onClick={() => setManualPin((p) => { const n = { ...p }; delete n[hole]; return n; })}
+                      style={{ width: 44, height: 44, background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 12, fontSize: 13, color: "#dc2626", cursor: "pointer", fontWeight: 900 }}
+                    >✕</button>
+                  )}
+                </div>
                   <div style={{ height: 420 }}>
                     <MapContainer center={mapCenter} zoom={17} scrollWheelZoom style={{ height: "100%", width: "100%" }}>
                       <TileLayer attribution="Esri" url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" />
                       <RecenterMap center={mapCenter} zoom={17} enabled={!autoFit} />
                       <FitBounds shots={visShots} currentShot={currentShot} enabled={autoFit} />
-                      {greenLoc && mapMode === "hole" && <Marker icon={makeGreenIcon()} position={[greenLoc.lat, greenLoc.lng]}><Popup>Hole {hole} Pin{rawPinDist ? ` · ${rawPinDist} yds` : ""}</Popup></Marker>}
+                      <MapClickHandler onMapClick={(loc) => { if (pinSetMode) { setManualPin((p) => ({ ...p, [hole]: loc })); setPinSetMode(false); } }} enabled={pinSetMode} />
+                      {extractGreen(holeData) && mapMode === "hole" && <Marker icon={makeGreenIcon()} position={[extractGreen(holeData).lat, extractGreen(holeData).lng]}><Popup>Hole {hole} Pin{rawPinDist ? ` · ${rawPinDist} yds` : ""}</Popup></Marker>}
+                      {manualPin[hole] && !extractGreen(holeData) && <Marker icon={makePinSetIcon()} position={[manualPin[hole].lat, manualPin[hole].lng]}><Popup>Hole {hole} Pin (manual){rawPinDist ? ` · ${rawPinDist} yds` : ""}</Popup></Marker>}
                       {currentShot?.start && <Marker icon={makeStartIcon()} position={[currentShot.start.lat, currentShot.start.lng]}><Popup>{currentShot.club} · Hole {currentShot.hole}</Popup></Marker>}
                       {visShots.map((s, i) => (
                         <React.Fragment key={s.id}>
