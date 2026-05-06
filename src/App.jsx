@@ -45,6 +45,56 @@ function weatherLabel(code) {
   return "Stormy";
 }
 
+
+
+// ── Shot shape learning ───────────────────────────────────────────────────────
+function getClubShapeTendency(shots, club) {
+  const list = shots.filter((s) => s.club === club && s.shotShape);
+  if (list.length < 5) return null;
+  const counts = {};
+  list.forEach((s) => { counts[s.shotShape] = (counts[s.shotShape] || 0) + 1; });
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const [shape, cnt] = sorted[0];
+  const pct = Math.round(cnt / list.length * 100);
+  if (pct < 30) return null;
+  return { shape, pct, total: list.length };
+}
+
+function getAimAdjustment(tendency) {
+  if (!tendency) return null;
+  const adjustments = {
+    Fade: { dir: "left", yards: 8, note: "fades right" },
+    Draw: { dir: "right", yards: 8, note: "draws left" },
+    Slice: { dir: "left", yards: 20, note: "slices right" },
+    Hook: { dir: "right", yards: 20, note: "hooks left" },
+  };
+  return adjustments[tendency.shape] || null;
+}
+
+function getMissWarning(shots, club, wind = 0, windDir = "N") {
+  const list = shots.filter((s) => s.club === club && s.result);
+  if (list.length < 5) return null;
+  const dangerous = ["Slice", "Hook", "Lost", "Penalty"];
+  const dangerCount = list.filter((s) => dangerous.includes(s.result) || dangerous.includes(s.shotShape)).length;
+  const pct = Math.round(dangerCount / list.length * 100);
+  if (pct < 30) return null;
+  return { pct, message: `You get in trouble with ${club} ${pct}% of the time. Consider going one club down.` };
+}
+
+// ── Handicap ──────────────────────────────────────────────────────────────────
+function calcHandicapDiff(score, courseRating, slope) {
+  return Math.round(((score - courseRating) * 113 / slope) * 10) / 10;
+}
+
+function calcHandicapIndex(diffs) {
+  if (diffs.length < 3) return null;
+  const sorted = [...diffs].sort((a, b) => a - b);
+  const useCount = diffs.length <= 6 ? 1 : diffs.length <= 8 ? 2 : diffs.length <= 10 ? 3 : diffs.length <= 12 ? 4 : diffs.length <= 14 ? 5 : diffs.length <= 16 ? 6 : diffs.length <= 18 ? 7 : 8;
+  const best = sorted.slice(0, useCount);
+  const avg = best.reduce((s, x) => s + x, 0) / best.length;
+  return Math.round(avg * 0.96 * 10) / 10;
+}
+
 function windDirLabel(deg) {
   const dirs = ["N","NE","E","SE","S","SW","W","NW"];
   return dirs[Math.round(deg / 45) % 8];
@@ -224,6 +274,24 @@ function FitBounds({ shots, currentShot, enabled = true }) {
   return null;
 }
 
+// -- Paywall ------------------------------------------------------------------
+function PaywallBanner({ onUpgrade }) {
+  return (
+    <div style={{ background: "linear-gradient(135deg, #fef3c7, #fff7ed)", border: "1px solid #fcd34d", borderRadius: 18, padding: 20, textAlign: "center", margin: "8px 0" }}>
+      <div style={{ fontSize: 28, marginBottom: 8 }}>★</div>
+      <div style={{ fontSize: 16, fontWeight: 900, color: "#111827", marginBottom: 6 }}>TracerBuddy Premium</div>
+      <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 4, lineHeight: 1.5 }}>Your AI caddie. Ghost shot prediction. Range finder. Weather-adjusted distances. AI round debrief. Shot dispersion. Handicap tracking.</div>
+      <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 16 }}>Everything a caddie, coach, and rangefinder gives you — for less than one sleeve of Pro V1s a month.</div>
+      <button onClick={onUpgrade} style={{ width: "100%", height: 52, background: "#b45309", color: "white", border: "none", borderRadius: 14, fontSize: 16, fontWeight: 900, cursor: "pointer", marginBottom: 8 }}>Upgrade for $9.99/month</button>
+      <div style={{ fontSize: 11, color: "#9ca3af" }}>Cancel anytime. Free tier includes basic shot tracking and last 3 rounds.</div>
+    </div>
+  );
+}
+
+function PremiumBadge() {
+  return <span style={{ background: "#fef3c7", border: "1px solid #fcd34d", borderRadius: 999, padding: "2px 8px", fontSize: 10, fontWeight: 900, color: "#b45309" }}>PREMIUM</span>;
+}
+
 // -- UI components --------------------------------------------------------------
 function Card({ children, className = "" }) {
   return (
@@ -276,6 +344,51 @@ function Stat({ label, value, sub = "" }) {
   );
 }
 
+
+function DispersionMap({ shots, club }) {
+  const filtered = shots.filter((s) => (!club || s.club === club) && s.start && s.end);
+  if (filtered.length < 3) return <div style={{ padding: 20, textAlign: "center", fontSize: 12, color: "#9ca3af" }}>Need at least 3 shots with {club || "any club"} to show dispersion.</div>;
+
+  const W = 280, H = 200;
+  const cx = W / 2, cy = H * 0.75;
+
+  const bearings = filtered.map((s) => {
+    const dLng = (s.end.lng - s.start.lng) * Math.PI / 180;
+    const lat1 = s.start.lat * Math.PI / 180, lat2 = s.end.lat * Math.PI / 180;
+    const y = Math.sin(dLng) * Math.cos(lat2);
+    const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  });
+  const avgBearing = bearings.reduce((s, x) => s + x, 0) / bearings.length;
+
+  const points = filtered.map((s, i) => {
+    const dist = s.distance || 100;
+    const relBearing = (bearings[i] - avgBearing + 360) % 360;
+    const angle = relBearing > 180 ? relBearing - 360 : relBearing;
+    const angleRad = (angle - 90) * Math.PI / 180;
+    const scale = Math.min(H * 0.6 / Math.max(...filtered.map((x) => x.distance || 100)), 0.5);
+    const px = cx + Math.cos(angleRad + Math.PI / 2) * angle * 1.5;
+    const py = cy - dist * scale;
+    return { px: Math.max(10, Math.min(W - 10, px)), py: Math.max(10, Math.min(H - 10, py)), dist, s };
+  });
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ background: "#f0fdf4", borderRadius: 12 }}>
+      <ellipse cx={cx} cy={cy} rx={60} ry={20} fill="#15803d" opacity="0.15" />
+      <ellipse cx={cx} cy={cy} rx={20} ry={7} fill="#15803d" opacity="0.3" />
+      <text x={cx} y={cy + 5} textAnchor="middle" fontSize="10" fill="#15803d" fontWeight="900">GREEN</text>
+      <line x1={cx} y1={cy - 5} x2={cx} y2={10} stroke="#15803d" strokeWidth="1" strokeDasharray="4 3" opacity="0.3" />
+      {points.map((p, i) => (
+        <g key={i}>
+          <circle cx={p.px} cy={p.py} r="5" fill="#b45309" opacity="0.7" />
+          <text x={p.px + 7} y={p.py + 4} fontSize="8" fill="#374151">{p.dist}y</text>
+        </g>
+      ))}
+      <text x={cx} y={H - 5} textAnchor="middle" fontSize="9" fill="#9ca3af">Shot dispersion - {filtered.length} shots</text>
+    </svg>
+  );
+}
+
 function Sparkline({ data, color = AMBER, height = 56, invert = false }) {
   if (!data || data.length < 2) return <div style={{ height, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: "#9ca3af" }}>Not enough data yet</div>;
   const W = 300, H = height;
@@ -292,6 +405,162 @@ function Sparkline({ data, color = AMBER, height = 56, invert = false }) {
       {points.map(([px, py], i) => <circle key={i} cx={px} cy={py} r="3" fill={color} />)}
       <circle cx={last[0]} cy={last[1]} r="5" fill={color} />
     </svg>
+  );
+}
+
+
+// -- Animated Hole Flyover ----------------------------------------------------
+function HolePreview({ hole, holeData, course, onClose }) {
+  const mapRef = useRef(null);
+  const animRef = useRef(null);
+  const [phase, setPhase] = useState("loading"); // loading -> tee -> sweep -> green -> done
+  const [mapReady, setMapReady] = useState(false);
+
+  const par = holeData ? (holeData.par || holeData.hole_par || 4) : 4;
+  const teeBoxes = holeData ? (holeData.tee_boxes || holeData.teeBoxes || holeData.tees || []) : [];
+  const mensTee = Array.isArray(teeBoxes) ? (teeBoxes.find((t) => (t.tee_type || t.teeType || "").toLowerCase().includes("men")) || teeBoxes[0]) : null;
+  const yardage = mensTee ? (mensTee.yardage || mensTee.distance || null) : null;
+
+  const green = holeData ? (() => {
+    const g = holeData.green_location || holeData.greenLocation || holeData.pin_location || null;
+    if (!g) return null;
+    return { lat: g.lat ?? g.latitude, lng: g.lng ?? g.longitude ?? g.lon };
+  })() : null;
+
+  const tee = mensTee ? (() => {
+    const t = mensTee.tee_location || mensTee.teeLocation || null;
+    if (!t) return null;
+    return { lat: t.lat ?? t.latitude, lng: t.lng ?? t.longitude ?? t.lon };
+  })() : null;
+
+  // Fallback center
+  const center = green || tee || { lat: 40.2015, lng: -77.189 };
+
+  // Animate: start at tee zoomed out, sweep to green, zoom in
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
+
+    const startPos = tee || { lat: center.lat - 0.002, lng: center.lng };
+    const endPos = green || center;
+
+    // Phase 1: Show tee overview
+    setPhase("tee");
+    map.setView([startPos.lat, startPos.lng], 15, { animate: false });
+
+    const t1 = setTimeout(() => {
+      setPhase("sweep");
+      // Sweep from tee toward green
+      map.flyTo([endPos.lat, endPos.lng], 17, {
+        animate: true,
+        duration: 3.5,
+        easeLinearity: 0.25,
+      });
+    }, 1200);
+
+    const t2 = setTimeout(() => {
+      setPhase("green");
+      // Final zoom into the green
+      map.flyTo([endPos.lat, endPos.lng], 19, {
+        animate: true,
+        duration: 1.5,
+      });
+    }, 4800);
+
+    const t3 = setTimeout(() => setPhase("done"), 6400);
+
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+  }, [mapReady]);
+
+  const phaseLabel = {
+    loading: "Loading...",
+    tee: "Tee Box",
+    sweep: "Flying to green...",
+    green: "The Green",
+    done: "Hole Overview",
+  }[phase];
+
+  const phaseColor = phase === "sweep" ? "#b45309" : phase === "green" || phase === "done" ? "#15803d" : "#9ca3af";
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 60, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div style={{ width: "100%", maxWidth: 420, background: "white", borderRadius: "24px 24px 0 0", overflow: "hidden", maxHeight: "92vh", display: "flex", flexDirection: "column" }}>
+
+        {/* Header */}
+        <div style={{ background: "linear-gradient(135deg, #f0fdf4, #fef3c7)", padding: "16px 20px 12px", borderBottom: "1px solid #e5e7eb" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+            <div>
+              <div style={{ fontSize: 10, fontWeight: 900, color: "#15803d", textTransform: "uppercase", letterSpacing: "0.2em" }}>Hole Flyover</div>
+              <div style={{ fontSize: 24, fontWeight: 900, color: "#111827", lineHeight: 1.1 }}>Hole {hole} — Par {par}</div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {yardage && <div style={{ background: "white", border: "1px solid #e5e7eb", borderRadius: 10, padding: "6px 12px", fontSize: 14, fontWeight: 900, color: "#15803d" }}>{yardage}y</div>}
+              <button onClick={onClose} style={{ width: 34, height: 34, background: "rgba(0,0,0,0.08)", border: "none", borderRadius: 9, fontSize: 14, cursor: "pointer", color: "#374151" }}>X</button>
+            </div>
+          </div>
+          {/* Phase indicator */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: phaseColor, animation: phase === "sweep" ? "pulse 1s ease-in-out infinite" : "none" }} />
+            <span style={{ fontSize: 12, fontWeight: 700, color: phaseColor }}>{phaseLabel}</span>
+            {phase !== "done" && phase !== "loading" && (
+              <div style={{ flex: 1, height: 3, background: "#f3f4f6", borderRadius: 999, overflow: "hidden" }}>
+                <div style={{ height: "100%", background: "#15803d", borderRadius: 999, width: phase === "tee" ? "20%" : phase === "sweep" ? "65%" : "100%", transition: "width 3s ease" }} />
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Map */}
+        <div style={{ flex: 1, position: "relative", minHeight: 360 }}>
+          <MapContainer
+            center={[center.lat, center.lng]}
+            zoom={15}
+            scrollWheelZoom={false}
+            zoomControl={false}
+            attributionControl={false}
+            style={{ height: "100%", width: "100%", minHeight: 360 }}
+            ref={mapRef}
+            whenReady={() => setMapReady(true)}
+          >
+            <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" />
+            {tee && (
+              <Marker icon={L.divIcon({ className: "", html: `<div style="width:28px;height:28px;border-radius:50%;background:#b45309;color:white;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:11px;border:2px solid white;box-shadow:0 4px 8px rgba(0,0,0,.3);">T</div>`, iconSize: [28, 28], iconAnchor: [14, 14] })} position={[tee.lat, tee.lng]}>
+                <Popup>Tee Box</Popup>
+              </Marker>
+            )}
+            {green && (
+              <Marker icon={L.divIcon({ className: "", html: `<div style="width:28px;height:28px;border-radius:50%;background:#15803d;color:white;display:flex;align-items:center;justify-content:center;font-size:14px;border:2px solid white;box-shadow:0 4px 8px rgba(0,0,0,.3);">P</div>`, iconSize: [28, 28], iconAnchor: [14, 14] })} position={[green.lat, green.lng]}>
+                <Popup>Hole {hole} Pin</Popup>
+              </Marker>
+            )}
+            {tee && green && (
+              <Polyline positions={[[tee.lat, tee.lng], [green.lat, green.lng]]} pathOptions={{ color: "#f0c14b", weight: 3, opacity: 0.7, dashArray: "8 6" }} />
+            )}
+          </MapContainer>
+
+          {/* Overlay info cards */}
+          {(phase === "green" || phase === "done") && green && (
+            <div style={{ position: "absolute", bottom: 16, left: 16, right: 16, background: "rgba(0,0,0,0.65)", borderRadius: 14, padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: "rgba(255,255,255,0.7)" }}>The Green</span>
+              {yardage && <span style={{ fontSize: 14, fontWeight: 900, color: "#f0c14b" }}>{yardage} yards from tee</span>}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding: "12px 20px 28px", borderTop: "1px solid #f3f4f6" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 12 }}>
+            {[["Par", par], ["Yards", yardage || "-"], ["Hole", hole]].map(([l, v]) => (
+              <div key={l} style={{ background: "#f9fafb", borderRadius: 12, padding: "8px", textAlign: "center" }}>
+                <div style={{ fontSize: 9, color: "#9ca3af", textTransform: "uppercase" }}>{l}</div>
+                <div style={{ fontSize: 18, fontWeight: 900, color: "#111827" }}>{v}</div>
+              </div>
+            ))}
+          </div>
+          <button onClick={onClose} style={{ width: "100%", height: 50, background: "#15803d", color: "white", border: "none", borderRadius: 14, fontSize: 15, fontWeight: 900, cursor: "pointer" }}>Let's Play</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -334,6 +603,7 @@ function CourseSearch({ onSelect, selected }) {
           <div style={{ fontSize: 11, color: "#6b7280" }}>{selected.holes.length > 0 ? `${selected.holes.length} holes · GPS active` : "Loaded"}</div>
         </div>
         <button onClick={() => onSelect(null)} style={{ background: "#f3f4f6", border: "none", borderRadius: 10, padding: "8px 12px", fontSize: 12, fontWeight: 700, color: "#374151", cursor: "pointer" }}>Change</button>
+        <button onClick={() => document.dispatchEvent(new CustomEvent("openCourseNotes"))} style={{ background: "#f0fdf4", border: "none", borderRadius: 10, padding: "8px 12px", fontSize: 12, fontWeight: 700, color: GREEN, cursor: "pointer" }}>Notes</button>
       </div>
     );
   }
@@ -423,6 +693,27 @@ export default function App() {
   const [pinDistKey, setPinDistKey] = useState(0);
   const [manualPin, setManualPin] = useState({});
   const [pinSetMode, setPinSetMode] = useState(false);
+  const [isPremium, setIsPremium] = useState(() => localStorage.getItem("tb_premium") === "true");
+  const [showPaywall, setShowPaywall] = useState(false);
+  const [showHolePreview, setShowHolePreview] = useState(false);
+  const [dispersionClub, setDispersionClub] = useState("Driver");
+
+  // Auto-select most-used club for dispersion
+  useEffect(() => {
+    if (!allShots.length) return;
+    const counts = {};
+    allShots.forEach((s) => { if (s.club) counts[s.club] = (counts[s.club] || 0) + 1; });
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    if (top) setDispersionClub(top[0]);
+  }, [allShots]);
+  const [courseRating, setCourseRating] = useState("");
+  const [slopeRating, setSlopeRating] = useState("");
+  const [showCaddie, setShowCaddie] = useState(false);
+  const [showAIDebrief, setShowAIDebrief] = useState(false);
+  const [debriefRound, setDebriefRound] = useState(null);
+  const [showWeatherPredictor, setShowWeatherPredictor] = useState(false);
+  const [showCourseNotes, setShowCourseNotes] = useState(false);
+  const [showRangeFinder, setShowRangeFinder] = useState(false);
   const pinAnimRef = useRef(null);
   const watchRef = useRef(null);
 
@@ -623,10 +914,13 @@ export default function App() {
   // Trends
   const trends = useMemo(() => {
     const rounds = [...history].reverse().slice(0, 10);
+    const diffs = history.filter((r) => r.strokes > 0 && r.courseRating && r.slope).map((r) => calcHandicapDiff(r.strokes, r.courseRating, r.slope));
     return {
       toPar: rounds.filter((r) => r.strokes > 0).map((r) => r.toPar),
       longest: rounds.filter((r) => r.longestDrive > 0).map((r) => r.longestDrive),
       putts: rounds.filter((r) => r.totalPutts > 0).map((r) => r.totalPutts),
+      handicap: calcHandicapIndex(diffs),
+      diffs,
     };
   }, [history]);
 
@@ -649,7 +943,32 @@ export default function App() {
         return u;
       });
     }
+    // Auto-extract course rating and slope from API data
+    const raw = c?.raw || {};
+    const ratings = raw.ratings || raw.course_ratings || raw.tee_boxes || raw.tees || [];
+    let autoRating = null, autoSlope = null;
+    if (Array.isArray(ratings)) {
+      const mens = ratings.find((r) => (r.tee_type || r.teeType || r.color || "").toLowerCase().includes("men") || (r.tee_type || r.teeType || r.color || "").toLowerCase().includes("white") || (r.tee_type || r.teeType || r.color || "").toLowerCase().includes("blue")) || ratings[0];
+      if (mens) {
+        autoRating = mens.course_rating || mens.courseRating || mens.rating || null;
+        autoSlope = mens.slope_rating || mens.slopeRating || mens.slope || null;
+      }
+    } else if (raw.course_rating || raw.courseRating) {
+      autoRating = raw.course_rating || raw.courseRating;
+      autoSlope = raw.slope_rating || raw.slopeRating || raw.slope;
+    }
+    if (autoRating) setCourseRating(String(autoRating));
+    if (autoSlope) setSlopeRating(String(autoSlope));
   }
+
+  // Auto-show hole preview when hole changes (after hole 1)
+  const prevHoleRef = useRef(hole);
+  useEffect(() => {
+    if (started && hole !== prevHoleRef.current && hole > 1) {
+      setShowHolePreview(true);
+    }
+    prevHoleRef.current = hole;
+  }, [hole, started]);
 
   function startRound() { setStarted(true); setTab("track"); setStatus("Round started. Choose a club and tap Hit Shot."); }
 
@@ -692,6 +1011,8 @@ export default function App() {
         holesPlayed: totals.played, strokes: totals.strokes, toPar: totals.toPar,
         shotsTracked: done.length, longestDrive: best?.distance || 0, longestClub: best?.club || "",
         totalPutts: totals.putts, firH: totals.firH, firT: totals.firT, girH: totals.girH, girT: totals.girT,
+        courseRating: parseFloat(courseRating) || null,
+        slope: parseFloat(slopeRating) || null,
       }, ...prev]);
     }
     setShots([]); setCurrentShot(null); setHole(1);
@@ -785,6 +1106,7 @@ export default function App() {
                       ))}
                     </div>
                     <div style={{ fontSize: 11, color: "#9ca3af", textAlign: "center", marginTop: 8 }}>{weatherLabel(weather.weatherCode)} · Adjustments applied to suggestions</div>
+                    <button onClick={() => setShowWeatherPredictor(true)} style={{ width: "100%", height: 40, background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, fontSize: 13, fontWeight: 700, color: GREEN, cursor: "pointer", marginTop: 10 }}>View Adjusted Club Distances</button>
                   </>
                 )}
               </div>
@@ -792,6 +1114,19 @@ export default function App() {
           </div>
 
           <div style={{ paddingBottom: 16 }}>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 10, fontWeight: 900, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.16em", marginBottom: 8 }}>Course Rating & Slope (Optional — for Handicap)</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div>
+                  <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 4 }}>Course Rating</div>
+                  <input value={courseRating} onChange={(e) => setCourseRating(e.target.value)} placeholder="e.g. 71.4" type="number" step="0.1" style={{ width: "100%", background: "white", border: "1px solid #e5e7eb", borderRadius: 12, padding: "10px 14px", fontSize: 14, color: "#111827", outline: "none", boxSizing: "border-box" }} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 4 }}>Slope Rating</div>
+                  <input value={slopeRating} onChange={(e) => setSlopeRating(e.target.value)} placeholder="e.g. 125" type="number" style={{ width: "100%", background: "white", border: "1px solid #e5e7eb", borderRadius: 12, padding: "10px 14px", fontSize: 14, color: "#111827", outline: "none", boxSizing: "border-box" }} />
+                </div>
+              </div>
+            </div>
             <button onClick={startRound} style={{ width: "100%", height: 58, background: GREEN, color: "white", border: "none", borderRadius: 16, fontSize: 16, fontWeight: 900, cursor: "pointer", letterSpacing: "0.04em", textTransform: "uppercase" }}>Start Round</button>
             <div style={{ fontSize: 12, color: "#9ca3af", textAlign: "center", marginTop: 10 }}>Best used outdoors with location permission on.</div>
           </div>
@@ -814,7 +1149,10 @@ export default function App() {
               <div style={{ fontSize: 20, fontWeight: 900, letterSpacing: "-0.4px" }}><span style={{ color: GREEN }}>Tracer</span><span style={{ color: AMBER }}>Buddy</span></div>
               <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 1, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{course ? extractCourseName(course.raw) : "No course loaded"}</div>
             </div>
-            <div style={{ background: AMBER_LIGHT, border: `1px solid ${AMBER_BORDER}`, borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 900, color: AMBER }}>Hole {hole}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button onClick={() => setShowHolePreview(true)} style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: "6px 10px", fontSize: 11, fontWeight: 700, color: "#15803d", cursor: "pointer" }}>Preview</button>
+              <div style={{ background: AMBER_LIGHT, border: `1px solid ${AMBER_BORDER}`, borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 900, color: AMBER }}>Hole {hole}</div>
+            </div>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 3, background: "#f3f4f6", borderRadius: 12, padding: 3 }}>
             <Tab active={tab === "track"} icon="📍" label="Track" onClick={() => setTab("track")} />
@@ -897,6 +1235,8 @@ export default function App() {
                     <div style={{ fontSize: 14, fontWeight: 900, color: "#111827" }}>GPS Shot Tracker</div>
                     <div style={{ fontSize: 11, color: "#6b7280", marginTop: 4 }}>Stand still when marking shots for best accuracy.</div>
                   </div>
+                  <button onClick={() => setShowCaddie(true)} style={{ width: "100%", height: 46, background: "linear-gradient(135deg, #fef3c7, #fff7ed)", border: "1px solid #fcd34d", borderRadius: 14, fontSize: 14, fontWeight: 900, color: "#b45309", cursor: "pointer", marginBottom: 10 }}>🎩 Ask Your Caddie</button>
+                  <PreShotTimer onTime={(t) => { console.log("Routine time:", t); }} />
                   <div style={{ background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 12, padding: "10px 14px", fontSize: 13, color: "#374151", marginBottom: 14 }}>{loading ? "Working..." : status}</div>
                   <div style={{ fontSize: 9, fontWeight: 900, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.2em", marginBottom: 8 }}>Result</div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6, marginBottom: 12 }}>
@@ -965,6 +1305,20 @@ export default function App() {
                         </React.Fragment>
                       ))}
                       {shotLines.map((line) => <Polyline key={line.id} positions={line.pos} pathOptions={{ color: AMBER, weight: 4, opacity: 0.9, dashArray: "8 6" }} />)}
+                      {livePos && clubAvg[club] && (() => {
+                        const dist = adjDist || clubAvg[club];
+                        const bearing = greenLoc ? bearingTo(livePos, greenLoc) : 0;
+                        const tendency = getClubShapeTendency(allShots, club);
+                        const shapeOffset = tendency?.shape === "Fade" || tendency?.shape === "Slice" ? 8 : tendency?.shape === "Draw" || tendency?.shape === "Hook" ? -8 : 0;
+                        const adjBearing = (bearing + shapeOffset + 360) % 360;
+                        const landing = destinationPoint(livePos.lat, livePos.lng, dist, adjBearing);
+                        return (
+                          <React.Fragment>
+                            <Polyline positions={[[livePos.lat, livePos.lng], [landing.lat, landing.lng]]} pathOptions={{ color: "#34d399", weight: 3, opacity: 0.6, dashArray: "6 8" }} />
+                            <Marker icon={L.divIcon({ className: "", html: `<div style="width:18px;height:18px;border-radius:50%;background:rgba(52,211,153,0.4);border:2px solid #34d399;"></div>`, iconSize: [18, 18], iconAnchor: [9, 9] })} position={[landing.lat, landing.lng]}><Popup>Predicted landing: {dist}y</Popup></Marker>
+                          </React.Fragment>
+                        );
+                      })()}
                     </MapContainer>
                   </div>
                 </div>
@@ -972,6 +1326,10 @@ export default function App() {
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                   <button onClick={() => openMaps(lastLoc)} style={{ height: 52, background: GREEN, color: "white", border: "none", borderRadius: 12, fontSize: 13, fontWeight: 900, cursor: "pointer" }}>Open Maps</button>
                   <button onClick={lostBall} style={{ height: 52, background: "#f9fafb", color: "#374151", border: "1px solid #e5e7eb", borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Find Ball</button>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 8 }}>
+                  <button onClick={() => setShowRangeFinder(true)} style={{ height: 46, background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 12, fontSize: 12, fontWeight: 900, color: GREEN, cursor: "pointer" }}>📷 Range Finder</button>
+                  {course && <button onClick={() => setShowCourseNotes(true)} style={{ height: 46, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 12, fontSize: 12, fontWeight: 700, color: "#374151", cursor: "pointer" }}>📝 Course Notes</button>}
                 </div>
               </div>
             </Card>
@@ -1181,6 +1539,7 @@ export default function App() {
                               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                                 <div style={{ fontSize: 24, fontWeight: 900, color: toParCol }}>{toParStr}</div>
                                 <button onClick={() => setShareRound(r)} style={{ background: AMBER_LIGHT, border: `1px solid ${AMBER_BORDER}`, borderRadius: 9, padding: "5px 10px", fontSize: 11, fontWeight: 700, color: AMBER, cursor: "pointer" }}>Share</button>
+                              <button onClick={() => { setDebriefRound(r); setShowAIDebrief(true); }} style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 9, padding: "5px 10px", fontSize: 11, fontWeight: 700, color: GREEN, cursor: "pointer" }}>AI Debrief</button>
                               </div>
                             </div>
                             <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6 }}>
@@ -1200,7 +1559,40 @@ export default function App() {
                 </Card>
               )}
 
-              {history.length >= 2 && (
+              {trends.handicap !== null && (
+                <Card>
+                  <div style={{ padding: 16 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+                      <div>
+                        <div style={{ fontSize: 10, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.16em" }}>Handicap Index</div>
+                        <div style={{ fontSize: 48, fontWeight: 900, color: GREEN, lineHeight: 1 }}>{trends.handicap}</div>
+                        <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>Based on {trends.diffs.length} rounds with course rating/slope</div>
+                      </div>
+                      <div style={{ fontSize: 40 }}>⛳</div>
+                    </div>
+                    {trends.diffs.length >= 2 && <Sparkline data={trends.diffs} color={GREEN} invert />}
+                  </div>
+                </Card>
+              )}
+
+              {allShots.length >= 3 && (
+                <Card>
+                  <div style={{ padding: 16 }}>
+                    <div style={{ fontSize: 15, fontWeight: 900, color: "#111827", marginBottom: 4 }}>🎯 Shot Dispersion</div>
+                    <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 12 }}>Where your shots land vs target line.</div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                      {CLUBS.filter((c) => allShots.some((s) => s.club === c)).map((c) => (
+                        <button key={c} onClick={() => setDispersionClub(c)} style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11, fontWeight: 700, background: dispersionClub === c ? GREEN : "#f3f4f6", color: dispersionClub === c ? "white" : "#374151", border: "none", cursor: "pointer" }}>{c}</button>
+                      ))}
+                    </div>
+                    <DispersionMap shots={allShots} club={dispersionClub} />
+                  </div>
+                </Card>
+              )}
+
+              {!isPremium && history.length >= 3 && (
+                <PaywallBanner onUpgrade={() => { setIsPremium(true); localStorage.setItem("tb_premium", "true"); }} />
+              )}
                 <Card>
                   <div style={{ padding: 16 }}>
                     <div style={{ fontSize: 15, fontWeight: 900, color: "#111827", marginBottom: 4 }}>📈 Trends</div>
@@ -1219,6 +1611,44 @@ export default function App() {
       </div>
 
       {/* Share modal */}
+      {showRangeFinder && <RangeFinder distanceToPin={rawPinDist} hole={hole} onClose={() => setShowRangeFinder(false)} />}
+      {showCourseNotes && course && <CourseConditionNotes courseId={course.raw?.id || course.raw?.course_id} courseName={extractCourseName(course.raw)} onClose={() => setShowCourseNotes(false)} />}
+      {showWeatherPredictor && weather && <WeatherRoundPredictor weather={weather} clubAvg={clubAvg} onClose={() => setShowWeatherPredictor(false)} />}
+
+      {showCaddie && (
+        <CaddieMode
+          distanceToPin={rawPinDist}
+          adjDist={adjDist}
+          suggestedClub={suggestedClub}
+          clubAvg={clubAvg}
+          clubPersonal={clubPersonal}
+          weather={weather}
+          allShots={allShots}
+          currentClub={club}
+          onClose={() => setShowCaddie(false)}
+          onConfirm={() => { setShowCaddie(false); hitShot(); }}
+        />
+      )}
+
+      {showAIDebrief && debriefRound && (
+        <AIDebrief
+          round={debriefRound}
+          shots={allShots.filter((s) => s.finishedAt && new Date(s.finishedAt) >= new Date(debriefRound.date) - 86400000)}
+          onClose={() => { setShowAIDebrief(false); setDebriefRound(null); }}
+        />
+      )}
+
+      {showHolePreview && <HolePreview hole={hole} holeData={holeData} course={course} onClose={() => setShowHolePreview(false)} />}
+
+      {showPaywall && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+          <div style={{ width: "100%", maxWidth: 360 }}>
+            <PaywallBanner onUpgrade={() => { setIsPremium(true); localStorage.setItem("tb_premium", "true"); setShowPaywall(false); }} />
+            <button onClick={() => setShowPaywall(false)} style={{ width: "100%", height: 48, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 14, color: "white", fontSize: 14, fontWeight: 700, cursor: "pointer", marginTop: 10 }}>Maybe Later</button>
+          </div>
+        </div>
+      )}
+
       {shareRound && (() => {
         const r = shareRound;
         const toParStr = r.strokes ? (r.toPar === 0 ? "E" : r.toPar > 0 ? `+${r.toPar}` : `${r.toPar}`) : "-";
